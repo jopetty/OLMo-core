@@ -196,7 +196,7 @@ def build_trainer_config(common: CommonComponents, model_size: str) -> TrainerCo
                 name=run_name,
                 group=common.run_name,
                 project="hybrid-small-suite",
-                entity="ai2-llm",
+                entity="aristo",
                 cancel_check_interval=cancel_check_interval,
                 enabled=True,
                 tags=["pretraining", model_size],
