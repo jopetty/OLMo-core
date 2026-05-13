@@ -4,5 +4,9 @@ beaker session create \
     --cluster ai2/saturn \
     --gpus 1 \
     --min-runtime 2h \
-    # --mount src=weka,ref=reviz-default,dst=/weka \
-    --mount src=weka,ref=oe-training-default,dst=/weka/oe-training-default
+    --mount src=secret,ref=JACKSONP_ID_ED25519,dst=/root/.ssh/id_ed25519 \
+    --mount src=secret,ref=JACKSONP_SSH_CONFIG,dst=/root/.ssh/config \
+    --mount src=secret,ref=JACKSONP_GIT_CONFIG,dst=/root/.gitconfig \
+    --mount src=secret,ref=JACKSONP_BASHRC,dst=/root/.bashrc \
+    --mount src=weka,ref=oe-training-default,dst=/weka/oe-training-default \
+    --workspace ai2/linear-rnns \

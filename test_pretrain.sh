@@ -1,0 +1,1 @@
+uv run src/scripts/train/hybrid-small-suite/pretraining.py launch hybrid-small-275M ai2/saturn --launch.priority=urgent --launch.budget=ai2/oe-omai
