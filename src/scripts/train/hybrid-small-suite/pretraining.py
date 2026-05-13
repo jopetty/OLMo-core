@@ -144,8 +144,7 @@ def build_data_components(common: CommonComponents) -> DataComponents:
     dataset_config = NumpyFSLDatasetConfig.from_data_mix(
         mix=DATA_MIX,
         tokenizer=common.tokenizer,
-        # mix_base_dir="gs://ai2-llm",
-        mix_base_dir="/weka/oe-training-default/ai2-llm/",
+        mix_base_dir="gs://ai2-llm",
         sequence_length=common.max_sequence_length,
         max_target_sequence_length=max(8192, common.max_sequence_length),
         work_dir=common.work_dir,
