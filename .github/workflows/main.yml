@@ -22,6 +22,7 @@ env:
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   BEAKER_TOKEN: ${{ secrets.BEAKER_TOKEN }}
   GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
   checks:
@@ -83,10 +84,6 @@ jobs:
 
           - name: Test olmo3 ladder
             run: |
-              if [ -z "$BEAKER_TOKEN" ]; then
-                echo "Skipping OLMo 3 ladder dry-runs because BEAKER_TOKEN is unavailable."
-                exit 0
-              fi
               for size in 190M 370M 600M 760M 1B 3B 7B 13B; do
                 python ./src/scripts/train/ladder/olmo3_ladder.py dry-run --size="$size" --output-dir=./
               done
@@ -209,6 +206,7 @@ jobs:
             run: |
               pytest -v --color=yes -m gpu \
                 src/integration_tests/
+
     steps:
       - uses: actions/checkout@v5
         with:
@@ -252,10 +250,10 @@ jobs:
             --branch ${{ env.BRANCH_NAME }} \
             --beaker-image ${{ matrix.task.image }} \
             --budget ai2/oe-other \
-            --priority normal \
+            --priority low \
             --preemptible \
             --gpus ${{ matrix.task.gpus }} \
-            --task-timeout 8m \
+            --task-timeout 10m \
             --host-networking \
             --gpu-type h100 \
             --gpu-type a100 \

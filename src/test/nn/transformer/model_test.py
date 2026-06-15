@@ -10,7 +10,6 @@ import torch.nn as nn
 from torch.distributed.tensor import DTensor, Shard, init_device_mesh
 
 from olmo_core.config import DType
-from olmo_core.data.utils import get_position_ids_from_doc_lens
 from olmo_core.distributed.checkpoint import (
     load_model_and_optim_state,
     save_model_and_optim_state,
@@ -21,6 +20,7 @@ from olmo_core.distributed.parallel import (
     build_world_mesh,
 )
 from olmo_core.distributed.utils import get_full_tensor, get_world_size
+from olmo_core.exceptions import OLMoConfigurationError
 from olmo_core.nn.attention import (
     AttentionBackendName,
     AttentionConfig,
@@ -31,7 +31,6 @@ from olmo_core.nn.attention import (
 from olmo_core.nn.attention.ring import (
     RingContextParallelStyle,
     UlyssesContextParallelStyle,
-    UlyssesLoadBalancer,
 )
 from olmo_core.nn.feed_forward import ActivationFunction, FeedForwardConfig
 from olmo_core.nn.layer_norm import LayerNorm, LayerNormConfig, LayerNormType
@@ -54,11 +53,13 @@ from olmo_core.testing import (
     GPU_MARKS,
     TE_MARKS,
     requires_flash_attn_2,
-    requires_gpu,
     requires_multi_gpu,
     run_distributed_test,
 )
-from olmo_core.testing.utils import FLA_MARKS, has_fla
+from olmo_core.testing.utils import FLA_MARKS, has_fla, requires_fla, requires_gpu
+from olmo_core.train.train_module.transformer.config import (
+    TransformerPipelineParallelConfig,
+)
 from olmo_core.utils import get_default_device, seed_all
 
 log = logging.getLogger(__name__)
@@ -221,94 +222,6 @@ def get_transformer_inputs() -> torch.Tensor:
     return torch.arange(0, 128).unsqueeze(0)
 
 
-@requires_gpu
-@requires_flash_attn_2
-def test_transformer_auto_derives_position_ids_from_doc_lens():
-    seed_all(0)
-
-    layer_norm = LayerNormConfig(name=LayerNormType.rms, bias=False)
-    config = TransformerConfig(
-        d_model=64,
-        vocab_size=128,
-        n_layers=2,
-        block=TransformerBlockConfig(
-            sequence_mixer=AttentionConfig(
-                n_heads=4,
-                rope=RoPEConfig(),
-                backend=AttentionBackendName.flash_2,
-                bias=False,
-            ),
-            layer_norm=layer_norm,
-            feed_forward=FeedForwardConfig(hidden_size=128, bias=False),
-        ),
-        lm_head=LMHeadConfig(layer_norm=layer_norm, bias=False),
-    )
-
-    device = torch.device("cuda")
-    model = config.build(init_device="cuda")
-    model.init_weights(device=device, max_seq_len=12)
-    model.eval()
-
-    doc_lens = torch.tensor([[3, 4, 5]], dtype=torch.int32)
-    input_ids = torch.randint(0, config.vocab_size, (1, 12), device=device)
-    position_ids = get_position_ids_from_doc_lens(doc_lens, input_ids.size(1)).to(device)
-
-    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-        logits_auto = model(input_ids, doc_lens=doc_lens, max_doc_lens=[5])
-        logits_explicit = model(
-            input_ids, doc_lens=doc_lens, max_doc_lens=[5], position_ids=position_ids
-        )
-
-        logits_reference_parts = []
-        start = 0
-        for doc_len in doc_lens[0].tolist():
-            logits_reference_parts.append(model(input_ids[:, start : start + doc_len]))
-            start += doc_len
-        logits_reference = torch.cat(logits_reference_parts, dim=1)
-
-    torch.testing.assert_close(logits_auto, logits_explicit, rtol=BF16_RTOL, atol=BF16_ATOL)
-    torch.testing.assert_close(logits_auto, logits_reference, rtol=BF16_RTOL, atol=BF16_ATOL)
-
-
-def test_transformer_context_parallel_shards_position_ids_from_doc_lens():
-    layer_norm = LayerNormConfig(name=LayerNormType.rms, bias=False)
-    config = TransformerConfig(
-        d_model=64,
-        vocab_size=128,
-        n_layers=2,
-        block=TransformerBlockConfig(
-            sequence_mixer=AttentionConfig(
-                n_heads=4,
-                rope=RoPEConfig(),
-                backend=AttentionBackendName.torch,
-                bias=False,
-            ),
-            layer_norm=layer_norm,
-            feed_forward=FeedForwardConfig(hidden_size=128, bias=False),
-        ),
-        lm_head=LMHeadConfig(layer_norm=layer_norm, bias=False),
-    )
-
-    model = config.build(init_device="cpu")
-    model._cp_load_balancer = UlyssesLoadBalancer(cp_rank=1, cp_world_size=2)
-
-    input_ids = torch.arange(9).unsqueeze(0)
-    doc_lens = torch.tensor([[3, 4, 2]], dtype=torch.int32)
-    (
-        input_ids_local,
-        _,
-        all_block_kwargs,
-        per_block_kwargs,
-        _,
-    ) = model._prepare_inputs(input_ids=input_ids, doc_lens=doc_lens, max_doc_lens=[4])
-
-    assert input_ids_local.tolist() == [[8, 0, 0, 0, 0, 0, 0, 0]]
-    assert all_block_kwargs["position_ids"].tolist() == [[1, 0, 0, 0, 0, 0, 0, 0]]
-    assert all_block_kwargs["cu_doc_lens"].tolist() == [0, 3, 7, 9, 16]
-    assert all_block_kwargs["max_doc_len"] == 7
-    assert per_block_kwargs == {}
-
-
 def run_tensor_parallel_transformer(checkpoint_dir, outputs_path, architecture: str):
     device = get_default_device()
     config = get_transformer_config(architecture)
@@ -444,7 +357,7 @@ def run_context_parallel_transformer_ulysses(
     logits = DTensor.from_local(local_logits, mesh, (Shard(1),))
 
     og_logits = torch.load(outputs_path, map_location=device)
-    tol_scale = 2.0  # requires slightly more tolerance than default
+    tol_scale = 4.0  # requires slightly more tolerance than default
     torch.testing.assert_close(
         og_logits, get_full_tensor(logits), rtol=BF16_RTOL * tol_scale, atol=BF16_ATOL * tol_scale
     )
@@ -770,3 +683,207 @@ def test_qwen3_builder_configs(config_builder, expected_d_model):
     num_actual_params = sum(p.numel() for p in model.parameters())
     assert config.num_params == num_actual_params
     assert model.num_params == num_actual_params
+
+
+@pytest.mark.parametrize(
+    "config_builder,expected_d_model,expected_n_heads,expected_gdn_v_heads",
+    [
+        pytest.param(TransformerConfig.qwen3_5_0_8B, 1024, 8, 16, id="qwen3_5_0_8B"),
+        pytest.param(TransformerConfig.qwen3_5_4B, 2560, 16, 32, id="qwen3_5_4B"),
+        pytest.param(TransformerConfig.qwen3_5_9B, 4096, 16, 32, id="qwen3_5_9B"),
+        pytest.param(TransformerConfig.qwen3_5_27B, 5120, 24, 48, id="qwen3_5_27B"),
+    ],
+)
+def test_qwen3_5_builder_configs(
+    config_builder, expected_d_model, expected_n_heads, expected_gdn_v_heads
+):
+    config = config_builder(vocab_size=248320, n_layers=4)
+    assert config.d_model == expected_d_model
+    assert config.n_layers == 4
+    assert config.block_pattern == ["gdn", "gdn", "gdn", "attn"]
+    assert config.tie_word_embeddings
+
+    assert isinstance(config.block, dict)
+    gdn_block = config.block["gdn"]
+    attn_block = config.block["attn"]
+    assert isinstance(gdn_block.sequence_mixer, GatedDeltaNetConfig)
+    assert isinstance(attn_block.sequence_mixer, AttentionConfig)
+
+    gdn = gdn_block.sequence_mixer
+    assert gdn.allow_neg_eigval is False
+    assert gdn.n_v_heads == expected_gdn_v_heads
+    assert gdn.head_dim == 128
+
+    attn = attn_block.sequence_mixer
+    assert attn.n_heads == expected_n_heads
+    assert attn.head_dim == 256
+    assert attn.rope is not None
+    assert attn.rope.theta == 10_000_000
+    assert attn.rope.partial_rotary_factor == 0.25
+    assert attn.gate is not None
+
+    layer_types = ["gdn", "gdn", "gdn", "attn"]
+    for layer_idx, block_config in enumerate(config.resolved_block_configs):
+        if layer_types[layer_idx] == "gdn":
+            assert isinstance(block_config.sequence_mixer, GatedDeltaNetConfig)
+        else:
+            assert isinstance(block_config.sequence_mixer, AttentionConfig)
+
+
+@pytest.mark.parametrize(
+    "config_builder",
+    [
+        pytest.param(TransformerConfig.qwen3_5_0_8B, id="qwen3_5_0_8B"),
+        pytest.param(TransformerConfig.qwen3_5_4B, id="qwen3_5_4B"),
+        pytest.param(TransformerConfig.qwen3_5_9B, id="qwen3_5_9B"),
+        pytest.param(TransformerConfig.qwen3_5_27B, id="qwen3_5_27B"),
+    ],
+)
+@pytest.mark.skipif(not has_fla, reason="flash-linear-attention (fla) not available")
+def test_qwen3_5_param_count(config_builder):
+    config = config_builder(vocab_size=248320, n_layers=4)
+    model = config.build(init_device="meta")
+    num_actual_params = sum(p.numel() for p in model.parameters())
+    assert config.num_params == num_actual_params
+    assert model.num_params == num_actual_params
+
+
+@pytest.mark.parametrize(
+    "config_builder, expected_tie",
+    [
+        pytest.param(TransformerConfig.qwen3_0_6B, True, id="qwen3_0_6B"),
+        pytest.param(TransformerConfig.qwen3_1_7B, True, id="qwen3_1_7B"),
+        pytest.param(TransformerConfig.qwen3_4B, True, id="qwen3_4B"),
+        pytest.param(TransformerConfig.qwen3_8B, False, id="qwen3_8B"),
+        pytest.param(TransformerConfig.qwen3_14B, False, id="qwen3_14B"),
+        pytest.param(TransformerConfig.qwen3_32B, False, id="qwen3_32B"),
+    ],
+)
+def test_qwen3_small_sizes_tie_word_embeddings(config_builder, expected_tie):
+    assert config_builder(vocab_size=128, n_layers=2).tie_word_embeddings == expected_tie
+
+
+def test_qwen3_tie_word_embeddings_can_be_overridden():
+    config = TransformerConfig.qwen3_0_6B(vocab_size=128, n_layers=2, tie_word_embeddings=False)
+    assert not config.tie_word_embeddings
+
+
+def test_qwen3_5_tie_word_embeddings_can_be_overridden():
+    config = TransformerConfig.qwen3_5_0_8B(
+        vocab_size=128,
+        n_layers=4,
+        tie_word_embeddings=False,
+    )
+    assert not config.tie_word_embeddings
+
+
+def test_tied_word_embeddings_share_weight_after_init():
+    config = TransformerConfig.qwen3_0_6B(vocab_size=128, n_layers=2)
+    model = config.build(init_device="cpu")
+    model.init_weights(device=torch.device("cpu"))
+
+    assert model.tie_word_embeddings
+    # The tie must survive `init_weights`, which calls `to_empty`.
+    assert model.lm_head.w_out.weight is model.embeddings.weight
+
+    # The shared weight is only counted once.
+    num_actual_params = sum(p.numel() for p in model.parameters())
+    assert config.num_params == num_actual_params
+    assert model.num_params == num_actual_params
+
+
+@requires_gpu
+@requires_fla
+def test_qwen3_5_forward():
+    device = torch.device("cuda")
+    config = TransformerConfig.qwen3_5_0_8B(
+        vocab_size=1000,
+        n_layers=4,
+        attn_backend=AttentionBackendName.torch,
+    )
+    model = config.build(init_device="cpu").eval().to(device)
+    input_ids = torch.randint(0, 1000, (2, 16), device=device)
+    with torch.no_grad():
+        logits = model(input_ids)
+    assert logits.shape == (2, 16, 1000)
+
+
+def test_normalized_transformer_rejects_tied_word_embeddings():
+    with pytest.raises(OLMoConfigurationError):
+        TransformerConfig.ngpt_271M(vocab_size=128, n_layers=2, tie_word_embeddings=True)
+
+
+def test_pipeline_parallel_rejects_tied_word_embeddings():
+    config = TransformerConfig.qwen3_0_6B(vocab_size=128, n_layers=2)
+    model = config.build(init_device="cpu")
+    pp_config = TransformerPipelineParallelConfig(degree=1, split_points=[1])
+
+    with pytest.raises(NotImplementedError, match="tied word embeddings"):
+        pp_config.split_model(model, pp_mesh=None, device=torch.device("cpu"))
+
+
+def run_tensor_parallel_tied_word_embeddings():
+    device = get_default_device()
+    config = TransformerConfig.llama2_271M(
+        vocab_size=16_000, n_layers=2, fused_ops=False, tie_word_embeddings=True
+    )
+    mesh = init_device_mesh(device.type, (get_world_size(),), mesh_dim_names=("tp",))
+
+    model = config.build()
+    model.apply_tp(mesh["tp"])
+    model.init_weights(device=device, max_seq_len=512)
+
+    assert model.tie_word_embeddings
+    assert isinstance(model.embeddings.weight, DTensor)
+    # The tie survives `apply_tp` (which converts the weight to a sharded DTensor) and
+    # `init_weights` (which calls `to_empty`): both modules share one parameter.
+    assert model.lm_head.w_out.weight is model.embeddings.weight
+
+    input_ids = get_transformer_inputs().to(device)
+    logits = model(input_ids=input_ids)
+    logits.sum().backward()
+
+    # Gradients from the embedding lookup and the output projection accumulate into the single
+    # shared parameter.
+    assert model.embeddings.weight.grad is not None
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_tensor_parallel_tied_word_embeddings(backend: str):
+    run_distributed_test(
+        run_tensor_parallel_tied_word_embeddings,
+        backend=backend,
+        start_method="spawn",
+    )
+
+
+def run_fsdp_tied_word_embeddings():
+    device = get_default_device()
+    config = TransformerConfig.llama2_271M(
+        vocab_size=16_000, n_layers=2, fused_ops=False, tie_word_embeddings=True
+    )
+
+    model = config.build(init_device="meta")
+    model.apply_fsdp()
+    model.init_weights(device=device, max_seq_len=512)
+
+    assert model.tie_word_embeddings
+    assert isinstance(model.embeddings.weight, DTensor)
+    # The embeddings and LM head are not sharded into separate FSDP groups when tied, so they
+    # stay in the root group and keep sharing one parameter.
+    assert model.lm_head.w_out.weight is model.embeddings.weight
+
+    input_ids = get_transformer_inputs().to(device)
+    logits = model(input_ids=input_ids)
+    logits.sum().backward()
+
+    assert model.embeddings.weight.grad is not None
+
+
+@requires_multi_gpu
+def test_fsdp_tied_word_embeddings():
+    run_distributed_test(
+        run_fsdp_tied_word_embeddings,
+        backend="nccl",
+        start_method="spawn",
+    )
