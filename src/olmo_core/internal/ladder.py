@@ -336,6 +336,12 @@ def get_default_ladder_factory(
     configure_run: Callable[[argparse.Namespace], RunConfigurator] | None = None,
 ) -> Callable[[argparse.Namespace], ModelLadder]:
     def factory(args: argparse.Namespace) -> ModelLadder:
+        sizes = list(TransformerSize)
+        if getattr(args, "size", None):
+            sizes = [args.size_enum(args.size)]
+        elif getattr(args, "max_size", None):
+            sizes = [s for s in sizes if s <= args.size_enum(args.max_size)]
+
         tokenizer = TokenizerConfig.dolma2()
         instance_sources: list[InstanceSourceConfig] = [
             ConcatAndChunkInstanceSourceConfig(
@@ -353,7 +359,7 @@ def get_default_ladder_factory(
             name=args.name,
             project=args.project,
             dir=str(io.join_path(get_root_dir(args.cluster), "model-ladders", args.name)),
-            sizes=list(TransformerSize),
+            sizes=sizes,
             max_devices=args.max_gpus,
             device_type=get_gpu_type(args.cluster),
             model_configurator=configure_model(args),
