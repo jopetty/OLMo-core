@@ -3,13 +3,13 @@
 set -euo pipefail
 
 COMMAND="${1:-${COMMAND:-dry-run}}"
-PPT_STEPS=500
-MODEL_SIZE="60M"
-CLUSTER="ai2/jupiter"
-RUN_NAME="pptexp-ppt-${PPT_STEPS}steps-${MODEL_SIZE}"
-WORKSPACE="ai2/linear-rnns"
-BUDGET="ai2/oe-other"
-PRIORITY="urgent"
+PPT_STEPS="${PPT_STEPS:-500}"
+MODEL_SIZE="${MODEL_SIZE:-60M}"
+CLUSTER="${CLUSTER:-ai2/jupiter}"
+RUN_NAME="${RUN_NAME:-pptexp-ppt-${PPT_STEPS}steps-${MODEL_SIZE}}"
+WORKSPACE="${WORKSPACE:-ai2/linear-rnns}"
+BUDGET="${BUDGET:-ai2/oe-other}"
+PRIORITY="${PRIORITY:-urgent}"
 
 case "$COMMAND" in
   dry-run | launch) ;;
