@@ -41,6 +41,7 @@ group ``ppt-olmo/{size}/train``, so variants such as ``train-0ppt-Cx8`` and
 Use ``--reinit-ppt-embeddings`` on a train stage to load the PPT checkpoint but randomize
 the input embedding table before natural-language training starts, e.g.
 ``--stage train --ppt-steps 500 --reinit-ppt-embeddings``.
+Add ``--reinit-ppt-lm-head`` to also randomize the LM head.
 
 The PPT stage reads tokenized numpy shards from
 ``/weka/oe-training-default/jacksonp/datasets/olmo-ppt/data/processed/*.npy`` by default.
@@ -97,10 +98,11 @@ class PPTStage(StrEnum):
 
 @dataclass
 class ReinitEmbeddingsAfterPPTLoadCallback(Callback):
-    """Reinitialize input embeddings after loading a specific PPT checkpoint."""
+    """Reinitialize input embeddings, and optionally the LM head, after loading PPT weights."""
 
     ppt_checkpoint_path: str
     seed: int
+    reinit_lm_head: bool = False
     enabled: bool = True
     _has_reinitialized: bool = False
 
@@ -115,12 +117,6 @@ class ReinitEmbeddingsAfterPPTLoadCallback(Callback):
         if model.embeddings is None:
             raise OLMoConfigurationError("Cannot reinitialize embeddings: model has no embeddings.")
 
-        if model.tie_word_embeddings:
-            log.warning(
-                "Model has tied word embeddings; reinitializing input embeddings will also "
-                "reinitialize the LM head weights."
-            )
-
         generator = torch.Generator(device=model.embeddings.weight.device).manual_seed(self.seed)
         model.init_method.init_embeddings(
             model.embeddings,
@@ -131,9 +127,27 @@ class ReinitEmbeddingsAfterPPTLoadCallback(Callback):
             else model.init_std,
             generator=generator,
         )
+        reinitialized_lm_head = False
+        if self.reinit_lm_head and model.tie_word_embeddings:
+            log.warning(
+                "Model has tied word embeddings; reinitializing input embeddings already "
+                "reinitialized the LM head weights."
+            )
+            reinitialized_lm_head = True
+        elif self.reinit_lm_head:
+            if model.lm_head is None:
+                raise OLMoConfigurationError("Cannot reinitialize LM head: model has no LM head.")
+            model.init_method.init_final_w_out(
+                model.lm_head.w_out,
+                d_model=model.d_model,
+                std=model.init_std,
+                generator=generator,
+            )
+            reinitialized_lm_head = True
         self._has_reinitialized = True
         log.info(
-            "Reinitialized input embeddings after loading PPT checkpoint '%s' with seed %d.",
+            "Reinitialized %s after loading PPT checkpoint '%s' with seed %d.",
+            "input embeddings and LM head" if reinitialized_lm_head else "input embeddings",
             path,
             self.seed,
         )
@@ -191,6 +205,7 @@ class PPTLadder(ModelLadder):
     ppt_steps: int
     chinchilla_multiple: float
     reinit_ppt_embeddings: bool
+    reinit_ppt_lm_head: bool
     embedding_reinit_seed: int
 
     def get_stage_dirname(self, stage: Literal["ppt", "train"]) -> str:
@@ -201,6 +216,7 @@ class PPTLadder(ModelLadder):
                 f"train-{self.ppt_steps}ppt-"
                 f"Cx{_format_chinchilla_multiple(self.chinchilla_multiple)}"
                 f"{'-reinit-emb' if self.reinit_ppt_embeddings else ''}"
+                f"{'-lm-head' if self.reinit_ppt_lm_head else ''}"
             )
 
     def get_stage_save_folder(self, stage: Literal["ppt", "train"], size_spec: str) -> str:
@@ -239,6 +255,7 @@ class PPTLadder(ModelLadder):
                     ReinitEmbeddingsAfterPPTLoadCallback(
                         ppt_checkpoint_path=ppt_checkpoint_path,
                         seed=self.embedding_reinit_seed,
+                        reinit_lm_head=self.reinit_ppt_lm_head,
                     )
                 )
 
@@ -252,6 +269,7 @@ class PPTLadder(ModelLadder):
                 f"ppt_steps:{self.ppt_steps}",
                 f"chinchilla_multiple:{_format_chinchilla_multiple(self.chinchilla_multiple)}",
                 f"reinit_ppt_embeddings:{self.reinit_ppt_embeddings}",
+                f"reinit_ppt_lm_head:{self.reinit_ppt_lm_head}",
             ]
         if "slack_notifier" in config.callbacks:
             config.callbacks["slack_notifier"].name = run_name  # type: ignore[attr-defined]
@@ -302,6 +320,15 @@ def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         help=(
             "For train stages loaded from a PPT checkpoint, reinitialize the input embedding "
             "table after loading checkpoint weights."
+        ),
+    )
+    parser.add_argument(
+        "--reinit-ppt-lm-head",
+        action="store_true",
+        default=False,
+        help=(
+            "Only valid with --reinit-ppt-embeddings. Also reinitialize the LM head after "
+            "loading PPT weights."
         ),
     )
     parser.add_argument(
@@ -368,6 +395,8 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
         raise OLMoConfigurationError(
             "--reinit-ppt-embeddings requires --stage=train and --ppt-steps > 0"
         )
+    if args.reinit_ppt_lm_head and not args.reinit_ppt_embeddings:
+        raise OLMoConfigurationError("--reinit-ppt-lm-head requires --reinit-ppt-embeddings")
 
     if args.stage == PPTStage.ppt:
         if args.ppt_steps <= 0:
@@ -405,6 +434,7 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
         ppt_steps=args.ppt_steps,
         chinchilla_multiple=args.chinchilla_multiple,
         reinit_ppt_embeddings=args.reinit_ppt_embeddings,
+        reinit_ppt_lm_head=args.reinit_ppt_lm_head,
         embedding_reinit_seed=args.embedding_reinit_seed,
     )
 
