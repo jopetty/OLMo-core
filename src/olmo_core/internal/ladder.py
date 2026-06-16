@@ -336,12 +336,7 @@ def get_default_ladder_factory(
     configure_run: Callable[[argparse.Namespace], RunConfigurator] | None = None,
 ) -> Callable[[argparse.Namespace], ModelLadder]:
     def factory(args: argparse.Namespace) -> ModelLadder:
-        sizes = list(TransformerSize)
-        if getattr(args, "size", None):
-            sizes = [args.size_enum(args.size)]
-        elif getattr(args, "max_size", None):
-            sizes = [s for s in sizes if s <= args.size_enum(args.max_size)]
-
+        sizes = get_requested_sizes(args)
         tokenizer = TokenizerConfig.dolma2()
         instance_sources: list[InstanceSourceConfig] = [
             ConcatAndChunkInstanceSourceConfig(
@@ -380,6 +375,16 @@ def get_default_ladder_factory(
         return ladder
 
     return factory
+
+
+def get_requested_sizes(args: argparse.Namespace) -> list[TransformerSize]:
+    sizes = list(TransformerSize)
+    if getattr(args, "size", None):
+        return [args.size_enum(args.size)]
+    elif getattr(args, "max_size", None):
+        return [s for s in sizes if s <= args.size_enum(args.max_size)]
+    else:
+        return sizes
 
 
 def main(
