@@ -43,7 +43,8 @@ cmd=(
   --size "$MODEL_SIZE"
   --max-gpus "$MAX_GPUS"
   --name "$RUN_NAME"
-  --chinchilla-multiple 8.0
+  --stage "ppt" \
+  --ppt-steps $PPT_STEPS \
   --cluster "$CLUSTER"
 )
 
