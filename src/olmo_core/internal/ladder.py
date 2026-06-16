@@ -34,6 +34,7 @@ def parse_args(
     configure_ladder: Callable[[argparse.Namespace], ModelLadder],
     *,
     size_enum: Type[TransformerSize] = TransformerSize,
+    default_name: str = "olmo3-ladder",
     add_additional_args: Callable[[str, argparse.ArgumentParser], None] | None = None,
 ) -> argparse.Namespace:
     formatter_class = type(
@@ -73,7 +74,7 @@ def parse_args(
         parser.add_argument(
             "--name",
             type=str,
-            default="olmo3-ladder",
+            default=default_name,
             help="A name to assign to the ladder experiment.",
         )
         parser.add_argument(
@@ -392,21 +393,25 @@ def main(
     configure_model: Callable[[argparse.Namespace], ModelConfigurator] | None = None,
     configure_run: Callable[[argparse.Namespace], RunConfigurator] | None = None,
     size_enum: Type[TransformerSize] = TransformerSize,
+    default_name: str = "olmo3-ladder",
     add_additional_args: Callable[[str, argparse.ArgumentParser], None] | None = None,
 ):
     if configure_ladder is None:
-        assert (
-            configure_model is not None
-        ), "configure_model is required if configure_ladder is unspecified"
+        assert configure_model is not None, (
+            "configure_model is required if configure_ladder is unspecified"
+        )
 
         configure_ladder = get_default_ladder_factory(configure_model, configure_run)
     else:
-        assert (
-            configure_model is None and configure_run is None
-        ), "configure_model / configure_run and mutually exclusive with configure_ladder"
+        assert configure_model is None and configure_run is None, (
+            "configure_model / configure_run and mutually exclusive with configure_ladder"
+        )
 
     args = parse_args(
-        configure_ladder, size_enum=size_enum, add_additional_args=add_additional_args
+        configure_ladder,
+        size_enum=size_enum,
+        default_name=default_name,
+        add_additional_args=add_additional_args,
     )
     args.func(args)
 

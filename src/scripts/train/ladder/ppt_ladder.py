@@ -1,3 +1,48 @@
+"""
+Launch a two-stage pre-pretraining (PPT) ladder experiment.
+
+Typical usage keeps all variants under one shared ladder root named ``ppt-olmo``:
+
+    uv run src/scripts/train/ladder/ppt_ladder.py launch \
+      --size 60M \
+      --max-gpus 8 \
+      --stage ppt \
+      --ppt-steps 500 \
+      --cluster ai2/jupiter \
+      --workspace ai2/linear-rnns \
+      --budget ai2/oe-other \
+      --priority urgent
+
+Then launch normal OLMo pretraining initialized from that PPT checkpoint:
+
+    uv run src/scripts/train/ladder/ppt_ladder.py launch \
+      --size 60M \
+      --max-gpus 8 \
+      --stage train \
+      --ppt-steps 500 \
+      --chinchilla-multiple 4 \
+      --cluster ai2/jupiter \
+      --workspace ai2/linear-rnns \
+      --budget ai2/oe-other \
+      --priority urgent
+
+For the 0-PPT baseline, use ``--stage train --ppt-steps 0``. This trains from scratch because
+the train stage only loads a PPT checkpoint when ``ppt_steps > 0``.
+
+The default save layout is:
+
+    /weka/oe-training-default/ai2-llm/model-ladders/ppt-olmo/{size}/ppt-{ppt_steps}
+    /weka/oe-training-default/ai2-llm/model-ladders/ppt-olmo/{size}/train-{ppt_steps}ppt-Cx{chinchilla_multiple}
+
+W&B runs default to the shared project ``ppt-olmo``. Train runs for a given size share the
+group ``ppt-olmo/{size}/train``, so variants such as ``train-0ppt-Cx4`` and
+``train-500ppt-Cx4`` are easy to compare.
+
+The PPT stage reads tokenized numpy shards from
+``/weka/oe-training-default/jacksonp/datasets/olmo-ppt/data/processed/*.npy`` by default.
+Use ``--ppt-dataset-root`` / ``--ppt-dataset-name`` or ``--ppt-source-path`` for variants.
+"""
+
 import argparse
 import logging
 from dataclasses import dataclass
@@ -30,6 +75,10 @@ log = logging.getLogger(__name__)
 
 PPT_DATA_ROOT = "/weka/oe-training-default/jacksonp/datasets/"
 PPT_DATASET_NAME = "olmo-ppt/data/processed"
+
+
+def _format_chinchilla_multiple(chinchilla_multiple: float) -> str:
+    return f"{chinchilla_multiple:g}"
 
 
 class PPTStage(StrEnum):
@@ -87,9 +136,20 @@ class PPTLadder(ModelLadder):
 
     stage: Literal["ppt", "train"]
     ppt_steps: int
+    chinchilla_multiple: float
+
+    def get_stage_dirname(self, stage: Literal["ppt", "train"]) -> str:
+        if stage == "ppt":
+            return f"ppt-{self.ppt_steps}"
+        else:
+            return (
+                f"train-{self.ppt_steps}ppt-"
+                f"Cx{_format_chinchilla_multiple(self.chinchilla_multiple)}"
+            )
 
     def get_stage_save_folder(self, stage: Literal["ppt", "train"], size_spec: str) -> str:
-        return str(join_path(self.dir, f"{stage}-ppt{self.ppt_steps}", size_spec))
+        stage_dir = self.get_stage_dirname(stage)
+        return str(join_path(self.dir, size_spec, stage_dir))
 
     def get_save_folder(self, size_spec: str) -> str:
         return self.get_stage_save_folder(self.stage, size_spec)
@@ -108,7 +168,9 @@ class PPTLadder(ModelLadder):
         for_benchmarking: bool = False,
     ) -> TrainerConfig:
         config = super()._configure_trainer(size_spec, for_benchmarking=for_benchmarking)
-        run_name = f"{self.name}-{self.stage}-ppt{self.ppt_steps}-{size_spec}"
+        stage_dir = self.get_stage_dirname(self.stage)
+        run_name = f"{size_spec}/{stage_dir}"
+        wandb_group = f"{self.name}/{size_spec}/{self.stage}"
 
         if self.stage == "train" and self.ppt_steps > 0:
             config.load_path = self.get_ppt_checkpoint_path(size_spec)
@@ -118,7 +180,14 @@ class PPTLadder(ModelLadder):
 
         if "wandb" in config.callbacks:
             config.callbacks["wandb"].name = run_name  # type: ignore[attr-defined]
-            config.callbacks["wandb"].group = self.name  # type: ignore[attr-defined]
+            config.callbacks["wandb"].project = self.project or self.name  # type: ignore[attr-defined]
+            config.callbacks["wandb"].group = wandb_group  # type: ignore[attr-defined]
+            config.callbacks["wandb"].tags = [  # type: ignore[attr-defined]
+                f"stage:{self.stage}",
+                f"size:{size_spec}",
+                f"ppt_steps:{self.ppt_steps}",
+                f"chinchilla_multiple:{_format_chinchilla_multiple(self.chinchilla_multiple)}",
+            ]
         if "slack_notifier" in config.callbacks:
             config.callbacks["slack_notifier"].name = run_name  # type: ignore[attr-defined]
 
@@ -248,8 +317,13 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
         ),
         stage=str(args.stage),
         ppt_steps=args.ppt_steps,
+        chinchilla_multiple=args.chinchilla_multiple,
     )
 
 
 if __name__ == "__main__":
-    main(configure_ladder=configure_ladder, add_additional_args=add_args)
+    main(
+        configure_ladder=configure_ladder,
+        default_name="ppt-olmo",
+        add_additional_args=add_args,
+    )
