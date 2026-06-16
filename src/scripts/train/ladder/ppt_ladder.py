@@ -20,7 +20,7 @@ Then launch normal OLMo pretraining initialized from that PPT checkpoint:
       --max-gpus 8 \
       --stage train \
       --ppt-steps 500 \
-      --chinchilla-multiple 4 \
+      --chinchilla-multiple 8 \
       --cluster ai2/jupiter \
       --workspace ai2/linear-rnns \
       --budget ai2/oe-other \
@@ -35,8 +35,12 @@ The default save layout is:
     /weka/oe-training-default/ai2-llm/model-ladders/ppt-olmo/{size}/train-{ppt_steps}ppt-Cx{chinchilla_multiple}
 
 W&B runs default to the shared project ``ppt-olmo``. Train runs for a given size share the
-group ``ppt-olmo/{size}/train``, so variants such as ``train-0ppt-Cx4`` and
-``train-500ppt-Cx4`` are easy to compare.
+group ``ppt-olmo/{size}/train``, so variants such as ``train-0ppt-Cx8`` and
+``train-500ppt-Cx8`` are easy to compare.
+
+Use ``--reinit-ppt-embeddings`` on a train stage to load the PPT checkpoint but randomize
+the input embedding table before natural-language training starts, e.g.
+``--stage train --ppt-steps 500 --reinit-ppt-embeddings``.
 
 The PPT stage reads tokenized numpy shards from
 ``/weka/oe-training-default/jacksonp/datasets/olmo-ppt/data/processed/*.npy`` by default.
@@ -48,6 +52,9 @@ import logging
 from dataclasses import dataclass
 from typing import Literal
 
+import torch
+
+from olmo_core.aliases import PathOrStr
 from olmo_core.config import StrEnum
 from olmo_core.data import DataMix, TokenizerConfig
 from olmo_core.data.composable import (
@@ -61,7 +68,7 @@ from olmo_core.data.composable import (
 from olmo_core.exceptions import OLMoConfigurationError
 from olmo_core.internal.common import get_gpu_type, get_root_dir
 from olmo_core.internal.ladder import get_requested_sizes, main
-from olmo_core.io import join_path
+from olmo_core.io import join_path, normalize_path
 from olmo_core.model_ladder import (
     ModelLadder,
     Olmo3ModelConfigurator,
@@ -70,11 +77,13 @@ from olmo_core.model_ladder import (
 )
 from olmo_core.optim import OptimConfig, Scheduler
 from olmo_core.train import Checkpointer, Duration, LoadStrategy, TrainerConfig
+from olmo_core.train.callbacks import Callback
 
 log = logging.getLogger(__name__)
 
 PPT_DATA_ROOT = "/weka/oe-training-default/jacksonp/datasets/"
 PPT_DATASET_NAME = "olmo-ppt/data/processed"
+DEFAULT_CHINCHILLA_MULTIPLE = 8.0
 
 
 def _format_chinchilla_multiple(chinchilla_multiple: float) -> str:
@@ -84,6 +93,50 @@ def _format_chinchilla_multiple(chinchilla_multiple: float) -> str:
 class PPTStage(StrEnum):
     ppt = "ppt"
     train = "train"
+
+
+@dataclass
+class ReinitEmbeddingsAfterPPTLoadCallback(Callback):
+    """Reinitialize input embeddings after loading a specific PPT checkpoint."""
+
+    ppt_checkpoint_path: str
+    seed: int
+    enabled: bool = True
+    _has_reinitialized: bool = False
+
+    @torch.no_grad()
+    def post_checkpoint_loaded(self, path: PathOrStr):
+        if not self.enabled or self._has_reinitialized:
+            return
+        if normalize_path(path) != normalize_path(self.ppt_checkpoint_path):
+            return
+
+        model = self.trainer.train_module.model
+        if model.embeddings is None:
+            raise OLMoConfigurationError("Cannot reinitialize embeddings: model has no embeddings.")
+
+        if model.tie_word_embeddings:
+            log.warning(
+                "Model has tied word embeddings; reinitializing input embeddings will also "
+                "reinitialize the LM head weights."
+            )
+
+        generator = torch.Generator(device=model.embeddings.weight.device).manual_seed(self.seed)
+        model.init_method.init_embeddings(
+            model.embeddings,
+            d_model=model.d_model,
+            embed_scale=model.embed_scale,
+            std=model.embedding_init_std
+            if model.embedding_init_std is not None
+            else model.init_std,
+            generator=generator,
+        )
+        self._has_reinitialized = True
+        log.info(
+            "Reinitialized input embeddings after loading PPT checkpoint '%s' with seed %d.",
+            path,
+            self.seed,
+        )
 
 
 @dataclass(kw_only=True)
@@ -137,6 +190,8 @@ class PPTLadder(ModelLadder):
     stage: Literal["ppt", "train"]
     ppt_steps: int
     chinchilla_multiple: float
+    reinit_ppt_embeddings: bool
+    embedding_reinit_seed: int
 
     def get_stage_dirname(self, stage: Literal["ppt", "train"]) -> str:
         if stage == "ppt":
@@ -145,6 +200,7 @@ class PPTLadder(ModelLadder):
             return (
                 f"train-{self.ppt_steps}ppt-"
                 f"Cx{_format_chinchilla_multiple(self.chinchilla_multiple)}"
+                f"{'-reinit-emb' if self.reinit_ppt_embeddings else ''}"
             )
 
     def get_stage_save_folder(self, stage: Literal["ppt", "train"], size_spec: str) -> str:
@@ -173,10 +229,18 @@ class PPTLadder(ModelLadder):
         wandb_group = f"{self.name}/{size_spec}/{self.stage}"
 
         if self.stage == "train" and self.ppt_steps > 0:
-            config.load_path = self.get_ppt_checkpoint_path(size_spec)
+            ppt_checkpoint_path = self.get_ppt_checkpoint_path(size_spec)
+            config.load_path = ppt_checkpoint_path
             config.load_strategy = LoadStrategy.always
             config.load_trainer_state = False
             config.load_optim_state = False
+            if self.reinit_ppt_embeddings:
+                config.callbacks["reinit_embeddings_after_ppt_load"] = (
+                    ReinitEmbeddingsAfterPPTLoadCallback(
+                        ppt_checkpoint_path=ppt_checkpoint_path,
+                        seed=self.embedding_reinit_seed,
+                    )
+                )
 
         if "wandb" in config.callbacks:
             config.callbacks["wandb"].name = run_name  # type: ignore[attr-defined]
@@ -187,6 +251,7 @@ class PPTLadder(ModelLadder):
                 f"size:{size_spec}",
                 f"ppt_steps:{self.ppt_steps}",
                 f"chinchilla_multiple:{_format_chinchilla_multiple(self.chinchilla_multiple)}",
+                f"reinit_ppt_embeddings:{self.reinit_ppt_embeddings}",
             ]
         if "slack_notifier" in config.callbacks:
             config.callbacks["slack_notifier"].name = run_name  # type: ignore[attr-defined]
@@ -196,6 +261,7 @@ class PPTLadder(ModelLadder):
 
 def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
     del cmd
+    parser.set_defaults(chinchilla_multiple=DEFAULT_CHINCHILLA_MULTIPLE)
     parser.add_argument(
         "--stage",
         choices=list(PPTStage),
@@ -228,6 +294,21 @@ def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         type=str,
         default=PPT_DATASET_NAME,
         help="Dataset subdirectory under --ppt-dataset-root to use when --ppt-source-path is unset.",
+    )
+    parser.add_argument(
+        "--reinit-ppt-embeddings",
+        action="store_true",
+        default=False,
+        help=(
+            "For train stages loaded from a PPT checkpoint, reinitialize the input embedding "
+            "table after loading checkpoint weights."
+        ),
+    )
+    parser.add_argument(
+        "--embedding-reinit-seed",
+        type=int,
+        default=12536,
+        help="Seed for --reinit-ppt-embeddings.",
     )
 
 
@@ -283,6 +364,11 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
     tokenizer = TokenizerConfig.dolma2()
     base_run = _base_run_configurator(args)
 
+    if args.reinit_ppt_embeddings and (args.stage != PPTStage.train or args.ppt_steps <= 0):
+        raise OLMoConfigurationError(
+            "--reinit-ppt-embeddings requires --stage=train and --ppt-steps > 0"
+        )
+
     if args.stage == PPTStage.ppt:
         if args.ppt_steps <= 0:
             raise OLMoConfigurationError("--ppt-steps must be positive for --stage=ppt")
@@ -318,6 +404,8 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
         stage=str(args.stage),
         ppt_steps=args.ppt_steps,
         chinchilla_multiple=args.chinchilla_multiple,
+        reinit_ppt_embeddings=args.reinit_ppt_embeddings,
+        embedding_reinit_seed=args.embedding_reinit_seed,
     )
 
 
