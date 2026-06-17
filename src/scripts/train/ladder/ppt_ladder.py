@@ -77,7 +77,7 @@ from olmo_core.model_ladder import (
     RunConfigurator,
     WSDSChinchillaRunConfigurator,
 )
-from olmo_core.optim import OptimConfig, Scheduler
+from olmo_core.optim import CosWithWarmup, OptimConfig, Scheduler
 from olmo_core.train import Checkpointer, Duration, LoadStrategy, TrainerConfig
 from olmo_core.train.callbacks import Callback
 
@@ -192,6 +192,10 @@ class FixedStepsRunConfigurator(RunConfigurator):
     Defaults to 2.0 to undo the ``/2`` divisor in the WSDS configurator, matching the reference
     ppt2 codebase (e.g. ~4e-3 for 190M, ~2.3e-3 for 1B).
     """
+    warmup_steps: int = 1000
+    """Warmup steps for the PPT cosine schedule. Matches the reference ppt2 codebase."""
+    checkpoint_every: int = 250
+    """Save a checkpoint every this many PPT steps. Matches the reference ppt2 codebase."""
 
     def __post_init__(self):
         if self.steps <= 0:
@@ -206,20 +210,25 @@ class FixedStepsRunConfigurator(RunConfigurator):
 
     def configure_optimizer(self, num_params: int, batch_size: int) -> OptimConfig:
         config = self.base.configure_optimizer(num_params, batch_size)
-        if self.ppt_lr is not None:
-            config = dataclasses.replace(config, lr=self.ppt_lr)
-        else:
-            config = dataclasses.replace(config, lr=config.lr * self.ppt_lr_multiplier)
-        return config
+        lr = self.ppt_lr if self.ppt_lr is not None else config.lr * self.ppt_lr_multiplier
+        # Match ppt2 phase0: weight_decay=0.033, betas=(0.9, 0.95) regardless of batch size.
+        return dataclasses.replace(config, lr=lr, weight_decay=0.033, betas=(0.9, 0.95))
 
     def configure_lr_scheduler(self, num_params: int, batch_size: int) -> Scheduler:
-        return self.base.configure_lr_scheduler(num_params, batch_size)
+        del num_params, batch_size
+        return CosWithWarmup(warmup=self.warmup_steps, alpha_f=0.1)
 
     def configure_checkpoint_intervals(
         self, num_params: int, batch_size: int
     ) -> list[tuple[Duration, str]]:
         del num_params, batch_size
-        return [(Duration.steps(self.steps), self.checkpoint_name)]
+        intervals: list[tuple[Duration, str]] = []
+        step = self.checkpoint_every
+        while step < self.steps:
+            intervals.append((Duration.steps(step), f"step {step:,d}"))
+            step += self.checkpoint_every
+        intervals.append((Duration.steps(self.steps), self.checkpoint_name))
+        return intervals
 
     def plot_lr_schedule(
         self,
@@ -245,19 +254,23 @@ class PPTLadder(ModelLadder):
     ppt_batch_size: int
     ppt_lr: float | None
     ppt_lr_multiplier: float
+    warmup_steps: int
 
     def get_stage_dirname(self, stage: Literal["ppt", "train"]) -> str:
         ppt_lr_str = _format_ppt_lr(self.ppt_lr, self.ppt_lr_multiplier)
+        warmup_str = f"-wu{self.warmup_steps}" if self.warmup_steps != 1000 else ""
         if stage == "ppt":
             return (
                 f"ppt-{self.ppt_steps}"
                 f"-bs{self.ppt_batch_size}"
                 f"{'-' + ppt_lr_str if ppt_lr_str else ''}"
+                f"{warmup_str}"
             )
         else:
             ppt_config = (
                 f"-bs{self.ppt_batch_size}"
                 f"{'-' + ppt_lr_str if ppt_lr_str else ''}"
+                f"{warmup_str}"
             ) if self.ppt_steps > 0 else ""
             return (
                 f"train-{self.ppt_steps}ppt"
@@ -413,6 +426,18 @@ def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
             "in the WSDS configurator to match the reference ppt2 codebase."
         ),
     )
+    parser.add_argument(
+        "--ppt-warmup-steps",
+        type=int,
+        default=1000,
+        help="Warmup steps for the PPT cosine LR schedule. Default: 1000, matching ppt2.",
+    )
+    parser.add_argument(
+        "--ppt-checkpoint-every",
+        type=int,
+        default=250,
+        help="Save a checkpoint every this many PPT steps. Default: 250, matching ppt2.",
+    )
 
 
 def _base_run_configurator(args: argparse.Namespace) -> WSDSChinchillaRunConfigurator:
@@ -484,6 +509,8 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
             ppt_batch_size=args.ppt_batch_size,
             ppt_lr=args.ppt_lr,
             ppt_lr_multiplier=args.ppt_lr_multiplier,
+            warmup_steps=args.ppt_warmup_steps,
+            checkpoint_every=args.ppt_checkpoint_every,
         )
         instance_sources = _ppt_instance_sources(args, tokenizer)
     else:
@@ -518,6 +545,7 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
         ppt_batch_size=args.ppt_batch_size,
         ppt_lr=args.ppt_lr,
         ppt_lr_multiplier=args.ppt_lr_multiplier,
+        warmup_steps=args.ppt_warmup_steps,
     )
 
 
