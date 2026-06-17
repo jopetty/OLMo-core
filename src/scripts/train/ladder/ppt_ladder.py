@@ -31,8 +31,13 @@ the train stage only loads a PPT checkpoint when ``ppt_steps > 0``.
 
 The default save layout is:
 
-    /weka/oe-training-default/ai2-llm/model-ladders/ppt-olmo/{size}/ppt-{ppt_steps}
-    /weka/oe-training-default/ai2-llm/model-ladders/ppt-olmo/{size}/train-{ppt_steps}ppt-Cx{chinchilla_multiple}
+    /weka/.../ppt-olmo/{size}/ppt-{ppt_steps}-bs{batch_size}-{lr}-wu{warmup_steps}
+    /weka/.../ppt-olmo/{size}/train-{ppt_steps}ppt-bs{batch_size}-{lr}-wu{warmup_steps}-Cx{chinchilla_multiple}
+
+All PPT hyperparameters (``--ppt-batch-size``, ``--ppt-lr``/``--ppt-lr-multiplier``,
+``--ppt-warmup-steps``, ``--ppt-alpha-f``) are encoded in the directory name. The train stage
+must be launched with the same PPT args as the PPT stage so the checkpoint path resolves
+correctly (defaults will match if no overrides were used).
 
 W&B runs default to the shared project ``ppt-olmo``. Train runs for a given size share the
 group ``ppt-olmo/{size}/train``, so variants such as ``train-0ppt-Cx8`` and
