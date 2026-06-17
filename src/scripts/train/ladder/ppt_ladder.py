@@ -49,6 +49,7 @@ Use ``--ppt-dataset-root`` / ``--ppt-dataset-name`` or ``--ppt-source-path`` for
 """
 
 import argparse
+import dataclasses
 import logging
 from dataclasses import dataclass
 from typing import Literal
@@ -157,25 +158,51 @@ class ReinitEmbeddingsAfterPPTLoadCallback(Callback):
 class FixedStepsRunConfigurator(RunConfigurator):
     """
     Use the base optimizer and scheduler settings, but cap the run at a fixed number of steps.
+
+    Optionally override the Chinchilla-derived batch size and learning rate for the PPT stage.
+    The reference ppt2 codebase (michahu/ppt2) uses a much smaller batch (~65K tokens/step vs
+    ~524K for a 190M model) and a higher LR (~4e-3 for 190M) than the Chinchilla defaults.
     """
 
     base: RunConfigurator
     steps: int
     checkpoint_name: str
+    ppt_batch_size: int = 65536
+    """
+    Global batch size in tokens for the PPT stage. Defaults to ``32 * 2048 = 65,536``, matching
+    the reference ppt2 codebase and giving 8× more gradient steps per token than the
+    Chinchilla-derived batch (~524K for a 190M model).
+    """
+    ppt_lr: float | None = None
+    """
+    If set, overrides the peak learning rate for the PPT stage with an absolute value.
+    When ``None`` (default), ``ppt_lr_multiplier`` is applied to the Chinchilla-derived LR.
+    """
+    ppt_lr_multiplier: float = 2.0
+    """
+    Multiplier applied to the Chinchilla-derived LR for the PPT stage when ``ppt_lr`` is not set.
+    Defaults to 2.0 to undo the ``/2`` divisor in the WSDS configurator, matching the reference
+    ppt2 codebase (e.g. ~4e-3 for 190M, ~2.3e-3 for 1B).
+    """
 
     def __post_init__(self):
         if self.steps <= 0:
             raise OLMoConfigurationError("'steps' must be positive")
 
     def configure_target_batch_size(self, num_params: int) -> int:
-        return self.base.configure_target_batch_size(num_params)
+        return self.ppt_batch_size
 
     def configure_duration(self, num_params: int, batch_size: int) -> Duration:
         del num_params, batch_size
         return Duration.steps(self.steps)
 
     def configure_optimizer(self, num_params: int, batch_size: int) -> OptimConfig:
-        return self.base.configure_optimizer(num_params, batch_size)
+        config = self.base.configure_optimizer(num_params, batch_size)
+        if self.ppt_lr is not None:
+            config = dataclasses.replace(config, lr=self.ppt_lr)
+        else:
+            config = dataclasses.replace(config, lr=config.lr * self.ppt_lr_multiplier)
+        return config
 
     def configure_lr_scheduler(self, num_params: int, batch_size: int) -> Scheduler:
         return self.base.configure_lr_scheduler(num_params, batch_size)
@@ -337,6 +364,34 @@ def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         default=12536,
         help="Seed for --reinit-ppt-embeddings.",
     )
+    parser.add_argument(
+        "--ppt-batch-size",
+        type=int,
+        default=65536,
+        help=(
+            "Global batch size in tokens for the PPT stage. "
+            "Default: 65536 (32 * 2048), matching the reference ppt2 codebase."
+        ),
+    )
+    parser.add_argument(
+        "--ppt-lr",
+        type=float,
+        default=None,
+        help=(
+            "Absolute peak learning rate for the PPT stage. When unset, "
+            "--ppt-lr-multiplier is applied to the Chinchilla-derived LR instead."
+        ),
+    )
+    parser.add_argument(
+        "--ppt-lr-multiplier",
+        type=float,
+        default=2.0,
+        help=(
+            "Multiplier applied to the Chinchilla-derived LR for the PPT stage "
+            "when --ppt-lr is not set. Default: 2.0, which undoes the /2 divisor "
+            "in the WSDS configurator to match the reference ppt2 codebase."
+        ),
+    )
 
 
 def _base_run_configurator(args: argparse.Namespace) -> WSDSChinchillaRunConfigurator:
@@ -405,6 +460,9 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
             base=base_run,
             steps=args.ppt_steps,
             checkpoint_name=f"PPT final ({args.ppt_steps:,d} steps)",
+            ppt_batch_size=args.ppt_batch_size,
+            ppt_lr=args.ppt_lr,
+            ppt_lr_multiplier=args.ppt_lr_multiplier,
         )
         instance_sources = _ppt_instance_sources(args, tokenizer)
     else:
