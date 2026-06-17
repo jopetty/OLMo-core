@@ -92,6 +92,14 @@ def _format_chinchilla_multiple(chinchilla_multiple: float) -> str:
     return f"{chinchilla_multiple:g}"
 
 
+def _format_ppt_lr(ppt_lr: float | None, ppt_lr_multiplier: float) -> str:
+    if ppt_lr is not None:
+        return f"lr{ppt_lr:g}"
+    elif ppt_lr_multiplier != 1.0:
+        return f"lrx{ppt_lr_multiplier:g}"
+    return ""
+
+
 class PPTStage(StrEnum):
     ppt = "ppt"
     train = "train"
@@ -234,14 +242,27 @@ class PPTLadder(ModelLadder):
     reinit_ppt_embeddings: bool
     reinit_ppt_lm_head: bool
     embedding_reinit_seed: int
+    ppt_batch_size: int
+    ppt_lr: float | None
+    ppt_lr_multiplier: float
 
     def get_stage_dirname(self, stage: Literal["ppt", "train"]) -> str:
+        ppt_lr_str = _format_ppt_lr(self.ppt_lr, self.ppt_lr_multiplier)
         if stage == "ppt":
-            return f"ppt-{self.ppt_steps}"
-        else:
             return (
-                f"train-{self.ppt_steps}ppt-"
-                f"Cx{_format_chinchilla_multiple(self.chinchilla_multiple)}"
+                f"ppt-{self.ppt_steps}"
+                f"-bs{self.ppt_batch_size}"
+                f"{'-' + ppt_lr_str if ppt_lr_str else ''}"
+            )
+        else:
+            ppt_config = (
+                f"-bs{self.ppt_batch_size}"
+                f"{'-' + ppt_lr_str if ppt_lr_str else ''}"
+            ) if self.ppt_steps > 0 else ""
+            return (
+                f"train-{self.ppt_steps}ppt"
+                f"{ppt_config}"
+                f"-Cx{_format_chinchilla_multiple(self.chinchilla_multiple)}"
                 f"{'-reinit-emb' if self.reinit_ppt_embeddings else ''}"
                 f"{'-lm-head' if self.reinit_ppt_lm_head else ''}"
             )
@@ -494,6 +515,9 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
         reinit_ppt_embeddings=args.reinit_ppt_embeddings,
         reinit_ppt_lm_head=args.reinit_ppt_lm_head,
         embedding_reinit_seed=args.embedding_reinit_seed,
+        ppt_batch_size=args.ppt_batch_size,
+        ppt_lr=args.ppt_lr,
+        ppt_lr_multiplier=args.ppt_lr_multiplier,
     )
 
 
