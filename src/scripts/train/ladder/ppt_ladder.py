@@ -194,6 +194,8 @@ class FixedStepsRunConfigurator(RunConfigurator):
     """
     warmup_steps: int = 1000
     """Warmup steps for the PPT cosine schedule. Matches the reference ppt2 codebase."""
+    alpha_f: float = 0.1
+    """Final LR as a fraction of peak LR at end of cosine decay. Matches the reference ppt2 codebase."""
     checkpoint_every: int = 250
     """Save a checkpoint every this many PPT steps. Matches the reference ppt2 codebase."""
 
@@ -216,7 +218,7 @@ class FixedStepsRunConfigurator(RunConfigurator):
 
     def configure_lr_scheduler(self, num_params: int, batch_size: int) -> Scheduler:
         del num_params, batch_size
-        return CosWithWarmup(warmup=self.warmup_steps, alpha_f=0.1)
+        return CosWithWarmup(warmup=self.warmup_steps, alpha_f=self.alpha_f)
 
     def configure_checkpoint_intervals(
         self, num_params: int, batch_size: int
@@ -255,22 +257,26 @@ class PPTLadder(ModelLadder):
     ppt_lr: float | None
     ppt_lr_multiplier: float
     warmup_steps: int
+    alpha_f: float
 
     def get_stage_dirname(self, stage: Literal["ppt", "train"]) -> str:
         ppt_lr_str = _format_ppt_lr(self.ppt_lr, self.ppt_lr_multiplier)
-        warmup_str = f"-wu{self.warmup_steps}" if self.warmup_steps != 1000 else ""
+        warmup_str = f"-wu{self.warmup_steps}"
+        alpha_str = f"-af{self.alpha_f:g}" if self.alpha_f != 0.1 else ""
         if stage == "ppt":
             return (
                 f"ppt-{self.ppt_steps}"
                 f"-bs{self.ppt_batch_size}"
                 f"{'-' + ppt_lr_str if ppt_lr_str else ''}"
                 f"{warmup_str}"
+                f"{alpha_str}"
             )
         else:
             ppt_config = (
                 f"-bs{self.ppt_batch_size}"
                 f"{'-' + ppt_lr_str if ppt_lr_str else ''}"
                 f"{warmup_str}"
+                f"{alpha_str}"
             ) if self.ppt_steps > 0 else ""
             return (
                 f"train-{self.ppt_steps}ppt"
@@ -433,6 +439,12 @@ def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         help="Warmup steps for the PPT cosine LR schedule. Default: 1000, matching ppt2.",
     )
     parser.add_argument(
+        "--ppt-alpha-f",
+        type=float,
+        default=0.1,
+        help="Final LR as a fraction of peak at end of PPT cosine decay. Default: 0.1, matching ppt2.",
+    )
+    parser.add_argument(
         "--ppt-checkpoint-every",
         type=int,
         default=250,
@@ -510,6 +522,7 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
             ppt_lr=args.ppt_lr,
             ppt_lr_multiplier=args.ppt_lr_multiplier,
             warmup_steps=args.ppt_warmup_steps,
+            alpha_f=args.ppt_alpha_f,
             checkpoint_every=args.ppt_checkpoint_every,
         )
         instance_sources = _ppt_instance_sources(args, tokenizer)
@@ -546,6 +559,7 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
         ppt_lr=args.ppt_lr,
         ppt_lr_multiplier=args.ppt_lr_multiplier,
         warmup_steps=args.ppt_warmup_steps,
+        alpha_f=args.ppt_alpha_f,
     )
 
 
