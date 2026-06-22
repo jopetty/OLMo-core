@@ -77,12 +77,12 @@ DEFAULT_EXTRA_EVAL_TASKS = [
 ]
 
 SENSITIVITY_DATASETS = (
-    "aperiodic_supervised_n10000_v26_a50_m64_z1p2_s3",
     "r-trivial_unsupervised_n10000_v26_a50_m64_z1p2_s0",
+    "r-trivial_supervised_n10000_v26_a50_m64_z1p2_s1",
     "aperiodic_unsupervised_n10000_v26_a50_m64_z1p2_s2",
+    "aperiodic_supervised_n10000_v26_a50_m64_z1p2_s3",
     "periodic_unsupervised_n10000_v26_a50_m64_z1p2_s4",
     "periodic_supervised_n10000_v26_a50_m64_z1p2_s5",
-    "r-trivial_supervised_n10000_v26_a50_m64_z1p2_s1",
 )
 
 SENSITIVITY_DATASET_TOKENS: dict[str, int] = {
