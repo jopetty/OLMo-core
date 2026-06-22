@@ -176,6 +176,18 @@ def parse_args(
             help="Do a dry-run of the launch.",
             default=False,
         )
+        parser.add_argument(
+            "--pre-setup",
+            type=str,
+            default=None,
+            help="Command to run before the standard Gantry setup steps.",
+        )
+        parser.add_argument(
+            "--post-setup",
+            type=str,
+            default=None,
+            help="Command to run after the standard Gantry setup steps.",
+        )
 
     sub_commands: dict[str, argparse.ArgumentParser] = {}
 
@@ -447,6 +459,8 @@ def configure_launcher(
     if args.preemptible is not None:
         launch_config.preemptible = args.preemptible
     launch_config.allow_dirty = args.allow_dirty
+    launch_config.pre_setup = args.pre_setup
+    launch_config.post_setup = args.post_setup
     return launch_config
 
 
