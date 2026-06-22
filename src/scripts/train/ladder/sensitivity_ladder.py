@@ -65,16 +65,17 @@ SENSITIVITY_DATA_ROOT = (
     "/weka/oe-training-default/jacksonp/datasets/sensitivity-data/data/processed"
 )
 
-OLMO_EVAL_FORK_POST_SETUP = (
-    "pip install --force-reinstall --no-deps "
-    "'git+https://github.com/jopetty/olmo-eval.git@formal-langs'"
-)
+# OLMO_EVAL_FORK_POST_SETUP = (
+#     "pip install --force-reinstall --no-deps "
+#     "'git+https://github.com/jopetty/olmo-eval.git@formal-langs'"
+# )
 
-DEFAULT_EXTRA_EVAL_TASKS = [
-    "formal_langs_cube_unique:v6",
-    "formal_langs_cube_reassign_const:v6",
-    "formal_langs_cube_reassign_var:v6",
-]
+# DEFAULT_EXTRA_EVAL_TASKS = [
+#     "formal_langs_cube_unique:v6",
+#     "formal_langs_cube_reassign_const:v6",
+#     "formal_langs_cube_reassign_var:v6",
+# ]
+DEFAULT_EXTRA_EVAL_TASKS: list[str] = []
 
 SENSITIVITY_DATASETS = (
     "r-trivial_unsupervised_n10000_v26_a50_m64_z1p2_s0",
@@ -278,8 +279,8 @@ class SensitivityLadder(ModelLadder):
 def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
     if cmd == "launch-all":
         parser.set_defaults(_sensitivity_launch_all=True)
-    if "launch" in cmd:
-        parser.set_defaults(post_setup=OLMO_EVAL_FORK_POST_SETUP)
+    # if "launch" in cmd:
+    #     parser.set_defaults(post_setup=OLMO_EVAL_FORK_POST_SETUP)
     parser.add_argument(
         "--model-type",
         choices=list(SensitivityModelType),
