@@ -30,10 +30,11 @@ By default the sensitivity datasets are loaded from:
 
 import argparse
 import logging
+import math
 from dataclasses import dataclass
 from typing import Literal
 
-from olmo_core.config import StrEnum
+from olmo_core.config import DType, StrEnum
 from olmo_core.data import DataMix, TokenizerConfig
 from olmo_core.data.composable import (
     ComposableDataLoaderConfig,
@@ -51,13 +52,23 @@ from olmo_core.internal.common import get_gpu_type, get_root_dir
 from olmo_core.internal.ladder import get_requested_sizes, main
 from olmo_core.io import join_path
 from olmo_core.model_ladder import (
+    DeviceMeshSpec,
+    ModelConfigurator,
     ModelLadder,
     Olmo3ModelConfigurator,
     WSDSChinchillaRunConfigurator,
 )
-from olmo_core.nn.attention import AttentionConfig
+from olmo_core.nn.attention import AttentionBackendName, AttentionConfig, AttentionType, GateConfig
+from olmo_core.nn.attention import GateGranularity
 from olmo_core.nn.attention.recurrent import GatedDeltaNetConfig
-from olmo_core.nn.transformer.config import TransformerBlockConfig, TransformerConfig
+from olmo_core.nn.feed_forward import ActivationFunction, FeedForwardConfig
+from olmo_core.nn.layer_norm import LayerNormConfig, LayerNormType
+from olmo_core.nn.lm_head import LMHeadConfig, LMLossImplementation
+from olmo_core.nn.transformer.config import (
+    TransformerBlockConfig,
+    TransformerBlockType,
+    TransformerConfig,
+)
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +104,47 @@ SENSITIVITY_DATASET_TOKENS: dict[str, int] = {
     "aperiodic_supervised_n10000_v26_a50_m64_z1p2_s3": 1_988_130,
     "periodic_unsupervised_n10000_v26_a50_m64_z1p2_s4": 606_842,
     "periodic_supervised_n10000_v26_a50_m64_z1p2_s5": 1_955_320,
+}
+
+
+class HybridSmallSuiteSize(StrEnum):
+    size_275M = "275M"
+    size_810M = "810M"
+    size_1_4B = "1.4B"
+
+    @property
+    def config_key(self) -> str:
+        return str(self).lower()
+
+
+HYBRID_SMALL_SUITE_MODEL_CONFIGS: dict[str, dict[str, int]] = {
+    "275m": dict(
+        d_model=640,
+        hidden_size=640 * 8,
+        n_layers=10,
+        n_heads=8,
+        num_nodes=4,
+        global_batch_size=2_621_440,
+        rank_microbatch_size=5 * 8192,
+    ),
+    "810m": dict(
+        d_model=1024,
+        hidden_size=1024 * 8,
+        n_layers=15,
+        n_heads=16,
+        num_nodes=8,
+        global_batch_size=5_242_880,
+        rank_microbatch_size=2 * 8192,
+    ),
+    "1.4b": dict(
+        d_model=1280,
+        hidden_size=1280 * 8,
+        n_layers=20,
+        n_heads=16,
+        num_nodes=32,
+        global_batch_size=2 * 1024 * 1024,
+        rank_microbatch_size=4 * 8192,
+    ),
 }
 
 
@@ -186,9 +238,50 @@ def _get_sensitivity_tokens(args: argparse.Namespace, tokenizer: TokenizerConfig
     return usable_tokens
 
 
+def _attention_backend(device_type: str) -> AttentionBackendName:
+    device_type = device_type.lower()
+    if "b200" in device_type:
+        return AttentionBackendName.flash_4
+    if "h100" in device_type:
+        return AttentionBackendName.flash_3
+    return AttentionBackendName.torch
+
+
+def _get_size_config(size_spec: str) -> dict[str, int]:
+    return HYBRID_SMALL_SUITE_MODEL_CONFIGS[HybridSmallSuiteSize(size_spec).config_key]
+
+
 @dataclass(kw_only=True)
-class HybridOlmo3ModelConfigurator(Olmo3ModelConfigurator):
-    """Configure OLMo3-sized hybrid models with a repeating GDN/GDN/GDN/attention pattern."""
+class HybridSmallSuiteModelConfigurator(ModelConfigurator[TransformerConfig]):
+    """Configure transformer or hybrid models from the hybrid-small-suite size table."""
+
+    model_type: Literal["transformer", "hybrid"]
+    rank_microbatch_size: int | None = None
+
+    def configure_rank_microbatch_size(
+        self,
+        *,
+        size_spec: str,
+        sequence_length: int,
+        device_type: str,
+    ) -> int:
+        del device_type
+        if self.rank_microbatch_size is not None:
+            assert self.rank_microbatch_size > 0
+            assert self.rank_microbatch_size % sequence_length == 0
+            return self.rank_microbatch_size
+        cfg = _get_size_config(size_spec)
+        return cfg["rank_microbatch_size"]
+
+    def configure_minimal_device_mesh_spec(
+        self,
+        *,
+        size_spec: str,
+        sequence_length: int,
+        device_type: str,
+    ) -> DeviceMeshSpec:
+        del size_spec, sequence_length, device_type
+        return DeviceMeshSpec(world_size=8, dp_world_size=None)
 
     def configure_model(
         self,
@@ -198,34 +291,120 @@ class HybridOlmo3ModelConfigurator(Olmo3ModelConfigurator):
         tokenizer: TokenizerConfig,
         device_type: str,
     ) -> TransformerConfig:
-        config = super().configure_model(
-            size_spec=size_spec,
+        if sequence_length != 8192:
+            raise OLMoConfigurationError(
+                "Hybrid-small-suite model configs currently assume sequence length 8192."
+            )
+        cfg = _get_size_config(size_spec)
+        d_model = cfg["d_model"]
+        hidden_size = cfg["hidden_size"]
+        n_layers = cfg["n_layers"]
+        n_heads = cfg["n_heads"]
+        n_kv_heads = 8
+        head_dim = 128
+        global_layer_interval = 5
+        layer_norm_eps = 1e-6
+        dtype = DType.float32
+
+        layer_norm = LayerNormConfig(
+            name=LayerNormType.rms,
+            eps=layer_norm_eps,
+            bias=False,
+            dtype=dtype,
+        )
+        feed_forward = FeedForwardConfig(
+            hidden_size=hidden_size,
+            bias=False,
+            dtype=dtype,
+            activation=ActivationFunction.silu,
+        )
+        attention_block = TransformerBlockConfig(
+            name=TransformerBlockType.peri_norm,
+            sequence_mixer=AttentionConfig(
+                name=AttentionType.default,
+                n_heads=n_heads,
+                n_kv_heads=n_kv_heads,
+                head_dim=head_dim,
+                bias=False,
+                rope=None,
+                gate=GateConfig(
+                    granularity=GateGranularity.elementwise,
+                    full_precision=True,
+                ),
+                qk_norm=layer_norm,
+                use_head_qk_norm=True,
+                backend=_attention_backend(device_type),
+                dtype=dtype,
+            ),
+            feed_forward=feed_forward,
+            layer_norm=layer_norm,
+        )
+
+        block_overrides: dict[int, TransformerBlockConfig] | None = None
+        if self.model_type == SensitivityModelType.hybrid:
+            block = TransformerBlockConfig(
+                name=TransformerBlockType.peri_norm,
+                sequence_mixer=GatedDeltaNetConfig(
+                    n_heads=n_heads,
+                    n_v_heads=n_heads,
+                    head_dim=head_dim,
+                    expand_v=2.0,
+                    dtype=dtype,
+                ),
+                feed_forward=feed_forward,
+                layer_norm=layer_norm,
+            )
+            block_overrides = {
+                layer_idx: attention_block
+                for layer_idx in range(n_layers)
+                if layer_idx % global_layer_interval == (global_layer_interval - 1)
+            }
+        else:
+            block = attention_block
+
+        return TransformerConfig(
+            d_model=d_model,
+            vocab_size=tokenizer.padded_vocab_size(),
+            n_layers=n_layers,
+            block=block,
+            lm_head=LMHeadConfig(
+                loss_implementation=LMLossImplementation.default,
+                layer_norm=layer_norm,
+                bias=False,
+                dtype=dtype,
+            ),
+            dtype=dtype,
+            block_overrides=block_overrides,
+            embed_scale=math.sqrt(d_model),
+            embedding_norm=LayerNormConfig(
+                name=LayerNormType.rms,
+                eps=1e-6,
+                bias=False,
+            ),
+        )
+
+    def build_train_module(
+        self,
+        *,
+        size_spec: str,
+        sequence_length: int,
+        rank_microbatch_size: int,
+        model_config: TransformerConfig,
+        optim_config,
+        scheduler,
+        device_type: str,
+    ):
+        return Olmo3ModelConfigurator(
+            rank_microbatch_size=self.rank_microbatch_size
+        ).build_train_module(
+            size_spec="1B",
             sequence_length=sequence_length,
-            tokenizer=tokenizer,
+            rank_microbatch_size=rank_microbatch_size,
+            model_config=model_config,
+            optim_config=optim_config,
+            scheduler=scheduler,
             device_type=device_type,
         )
-        if config.n_layers % 4 != 0:
-            raise OLMoConfigurationError(
-                f"Hybrid model requires a layer count divisible by 4, got {config.n_layers} "
-                f"layers for size {size_spec}."
-            )
-        if not isinstance(config.block, TransformerBlockConfig):
-            raise OLMoConfigurationError("Hybrid conversion expected a single transformer block.")
-        if not isinstance(config.block.sequence_mixer, AttentionConfig):
-            raise OLMoConfigurationError("Hybrid conversion expected an attention sequence mixer.")
-
-        attn_block = config.block
-        attn = attn_block.sequence_mixer
-        gdn_block = attn_block.replace(
-            sequence_mixer=GatedDeltaNetConfig(
-                n_heads=attn.n_heads,
-                head_dim=max(1, int(0.75 * config.d_model / attn.n_heads)),
-                allow_neg_eigval=True,
-            )
-        )
-        config.block = {"gdn": gdn_block, "attn": attn_block}
-        config.block_pattern = ["gdn", "gdn", "gdn", "attn"]
-        return config
 
 
 @dataclass(kw_only=True)
@@ -349,9 +528,7 @@ def _model_configurator(args: argparse.Namespace) -> Olmo3ModelConfigurator:
     kwargs = dict(
         rank_microbatch_size=None if args.rank_mbz is None else args.rank_mbz * args.sequence_length
     )
-    if args.model_type == SensitivityModelType.hybrid:
-        return HybridOlmo3ModelConfigurator(**kwargs)
-    return Olmo3ModelConfigurator(**kwargs)
+    return HybridSmallSuiteModelConfigurator(model_type=str(args.model_type), **kwargs)
 
 
 def configure_ladder(args: argparse.Namespace) -> ModelLadder:
@@ -463,6 +640,7 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
 if __name__ == "__main__":
     main(
         configure_ladder=configure_ladder,
+        size_enum=HybridSmallSuiteSize,
         default_name="sensitivity-ladder",
         add_additional_args=add_args,
     )
