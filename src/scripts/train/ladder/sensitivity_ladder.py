@@ -456,6 +456,12 @@ class SensitivityLadder(ModelLadder):
 
 
 def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
+    parser.set_defaults(
+        cluster="ai2/jupiter",
+        workspace="ai2/linear-rnns",
+        budget="ai2/oe-other",
+        priority="urgent",
+    )
     if cmd == "launch-all":
         parser.set_defaults(_sensitivity_launch_all=True)
     # if "launch" in cmd:
