@@ -85,6 +85,15 @@ SENSITIVITY_DATASETS = (
     "r-trivial_supervised_n10000_v26_a50_m64_z1p2_s1",
 )
 
+SENSITIVITY_DATASET_TOKENS: dict[str, int] = {
+    "r-trivial_unsupervised_n10000_v26_a50_m64_z1p2_s0": 355_460,
+    "r-trivial_supervised_n10000_v26_a50_m64_z1p2_s1": 711_005,
+    "aperiodic_unsupervised_n10000_v26_a50_m64_z1p2_s2": 635_190,
+    "aperiodic_supervised_n10000_v26_a50_m64_z1p2_s3": 1_988_130,
+    "periodic_unsupervised_n10000_v26_a50_m64_z1p2_s4": 606_842,
+    "periodic_supervised_n10000_v26_a50_m64_z1p2_s5": 1_955_320,
+}
+
 
 class SensitivityModelType(StrEnum):
     transformer = "transformer"
@@ -143,6 +152,8 @@ def _sensitivity_source(
 def _get_sensitivity_tokens(args: argparse.Namespace, tokenizer: TokenizerConfig) -> int:
     if args.mixture_dataset_tokens is not None:
         raw_tokens = args.mixture_dataset_tokens
+    elif args.mixture_dataset in SENSITIVITY_DATASET_TOKENS:
+        raw_tokens = SENSITIVITY_DATASET_TOKENS[args.mixture_dataset]
     else:
         try:
             raw_tokens = NumpyDocumentSourceConfig(
@@ -154,8 +165,8 @@ def _get_sensitivity_tokens(args: argparse.Namespace, tokenizer: TokenizerConfig
         except Exception as exc:
             raise OLMoConfigurationError(
                 "Could not determine the sensitivity dataset token count. "
-                "If this environment cannot stat the WEKA paths, pass "
-                "--mixture-dataset-tokens explicitly."
+                "If this environment cannot stat the WEKA paths, add the dataset to "
+                "SENSITIVITY_DATASET_TOKENS or pass --mixture-dataset-tokens explicitly."
             ) from exc
 
     usable_tokens = (raw_tokens // args.sequence_length) * args.sequence_length
