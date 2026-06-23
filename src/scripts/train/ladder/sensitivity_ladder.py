@@ -72,6 +72,8 @@ from olmo_core.nn.transformer.config import (
 
 log = logging.getLogger(__name__)
 
+MAX_WANDB_TAG_LENGTH = 64
+
 SENSITIVITY_DATA_ROOT = (
     "/weka/oe-training-default/jacksonp/datasets/sensitivity-data/data/processed"
 )
@@ -159,6 +161,10 @@ def _format_chinchilla_multiple(chinchilla_multiple: float) -> str:
 
 def _source_label(dataset: str) -> str:
     return dataset.replace("_n10000_v26_a50_m64_z1p2_", "-")
+
+
+def _wandb_tags(*tags: str) -> list[str]:
+    return [tag[:MAX_WANDB_TAG_LENGTH] for tag in tags]
 
 
 def _source_paths(args: argparse.Namespace) -> list[str]:
@@ -439,14 +445,14 @@ class SensitivityLadder(ModelLadder):
             config.callbacks["wandb"].name = run_name  # type: ignore[attr-defined]
             config.callbacks["wandb"].project = self.project or self.name  # type: ignore[attr-defined]
             config.callbacks["wandb"].group = f"{self.name}/{size_spec}/{self.model_type}"  # type: ignore[attr-defined]
-            config.callbacks["wandb"].tags = [  # type: ignore[attr-defined]
+            config.callbacks["wandb"].tags = _wandb_tags(  # type: ignore[attr-defined]
                 f"size:{size_spec}",
                 f"model_type:{self.model_type}",
                 f"mixture_dataset:{self.mixture_dataset}",
                 f"chinchilla_multiple:{_format_chinchilla_multiple(self.chinchilla_multiple)}",
                 f"sensitivity_tokens:{self.sensitivity_tokens}",
                 f"training_tokens:{self.training_tokens}",
-            ]
+            )
         if "slack_notifier" in config.callbacks:
             config.callbacks["slack_notifier"].name = run_name  # type: ignore[attr-defined]
         return config
