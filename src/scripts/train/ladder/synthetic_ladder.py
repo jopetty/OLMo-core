@@ -24,7 +24,7 @@ The default save layout is:
 
 By default the synthetic datasets are loaded from:
 
-    /weka/oe-training-default/jacksonp/datasets/sensitivity-data/data/processed/{dataset}/*.npy
+    /weka/oe-training-default/jacksonp/sensitivity-data/data/processed/{dataset}/*.npy
 """
 
 import argparse
@@ -68,7 +68,7 @@ from sensitivity_ladder import (
     _wandb_tags,
 )
 
-SYNTHETIC_DATA_ROOT = "/weka/oe-training-default/jacksonp/datasets/sensitivity-data"
+SYNTHETIC_DATA_ROOT = "/weka/oe-training-default/jacksonp/sensitivity-data"
 
 SYNTHETIC_DATASETS: dict[str, tuple[str, int]] = {
     # "aperiodic_supervised_n200000000_v26_a50_m64_z1p2_s3": (
