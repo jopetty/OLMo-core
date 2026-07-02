@@ -8,10 +8,9 @@ Chinchilla token budget for the requested model size.
 Typical usage:
 
     uv run src/scripts/train/ladder/synthetic_ladder.py launch \
-      --size 20M \
+      --size 60M \
       --model-type transformer \
-      --mixture-dataset aperiodic_supervised_n200000000_v26_a50_m64_z1p2_s3 \
-      --chinchilla-multiple 8 \
+      aperiodic 100 \
       --max-gpus 8 \
       --cluster ai2/jupiter \
       --workspace ai2/linear-rnns \
@@ -28,10 +27,11 @@ By default the synthetic datasets are loaded from:
 """
 
 import argparse
-import math
+import logging
 from dataclasses import dataclass
+from typing import Literal
 
-from olmo_core.config import DType, StrEnum
+from olmo_core.config import StrEnum
 from olmo_core.data import TokenizerConfig
 from olmo_core.data.composable import (
     ComposableDataLoaderConfig,
@@ -47,118 +47,229 @@ from olmo_core.io import join_path
 from olmo_core.model_ladder import (
     DeviceMeshSpec,
     ModelLadder,
+    Olmo3ModelConfigurator,
     WSDSChinchillaRunConfigurator,
 )
-from olmo_core.nn.attention import AttentionConfig, AttentionType, GateConfig, GateGranularity
+from olmo_core.nn.attention import AttentionConfig
 from olmo_core.nn.attention.recurrent import GatedDeltaNetConfig
-from olmo_core.nn.feed_forward import ActivationFunction, FeedForwardConfig
-from olmo_core.nn.layer_norm import LayerNormConfig, LayerNormType
-from olmo_core.nn.lm_head import LMHeadConfig, LMLossImplementation
-from olmo_core.nn.transformer.config import (
-    TransformerBlockConfig,
-    TransformerBlockType,
-    TransformerConfig,
-)
+from olmo_core.nn.transformer.config import TransformerBlockConfig, TransformerConfig
 
 from sensitivity_ladder import (
-    HybridSmallSuiteModelConfigurator,
     SensitivityModelType,
-    _attention_backend,
     _format_chinchilla_multiple,
     _wandb_tags,
 )
 
+log = logging.getLogger(__name__)
+
 SYNTHETIC_DATA_ROOT = "/weka/oe-training-default/jacksonp/sensitivity-data"
 
 SYNTHETIC_DATASETS: dict[str, tuple[str, int]] = {
-    # "aperiodic_supervised_n200000000_v26_a50_m64_z1p2_s3": (
-    #     "data/processed/aperiodic_supervised_n200000000_v26_a50_m64_z1p2_s3",
-    #     39_955_714_725,
+    # "aperiodic_0supervision_n200000000_v26_a50_m64_z1p2": (
+    #     "data/processed/aperiodic_0supervision_n200000000_v26_a50_m64_z1p2",
+    #     12_986_323_520,
     # ),
-    # "aperiodic_supervised_n200000000_v26_a50_m64_z1p2_s3_gte2048": (
-    #     "data/processed/aperiodic_supervised_n200000000_v26_a50_m64_z1p2_s3_gte2048",
-    #     9_266_616_069,
+    # "aperiodic_0supervision_n200000000_v26_a50_m64_z1p2_assignments_gte10": (
+    #     "data/processed/aperiodic_0supervision_n200000000_v26_a50_m64_z1p2_assignments_gte10",
+    #     9_079_059_147,
     # ),
-    "aperiodic_supervised_n200000000_v26_a50_m64_z1p2_s3_lt2048": (
-        "data/processed/aperiodic_supervised_n200000000_v26_a50_m64_z1p2_s3_lt2048",
-        30_689_098_656,
+    "aperiodic_0supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10": (
+        "data/processed/aperiodic_0supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10",
+        3_907_264_373,
     ),
-    # "aperiodic_unsupervised_n200000000_v26_a50_m64_z1p2_s2": (
-    #     "data/processed/aperiodic_unsupervised_n200000000_v26_a50_m64_z1p2_s2",
-    #     12_989_047_750,
+    # "aperiodic_50supervision_n200000000_v26_a50_m64_z1p2": (
+    #     "data/processed/aperiodic_50supervision_n200000000_v26_a50_m64_z1p2",
+    #     35_693_177_705,
     # ),
-    # "aperiodic_unsupervised_n200000000_v26_a50_m64_z1p2_s2_gte512": (
-    #     "data/processed/aperiodic_unsupervised_n200000000_v26_a50_m64_z1p2_s2_gte512",
-    #     869_803_741,
+    # "aperiodic_50supervision_n200000000_v26_a50_m64_z1p2_assignments_gte10": (
+    #     "data/processed/aperiodic_50supervision_n200000000_v26_a50_m64_z1p2_assignments_gte10",
+    #     30_449_347_284,
     # ),
-    "aperiodic_unsupervised_n200000000_v26_a50_m64_z1p2_s2_lt512": (
-        "data/processed/aperiodic_unsupervised_n200000000_v26_a50_m64_z1p2_s2_lt512",
-        12_119_244_009,
+    "aperiodic_50supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10": (
+        "data/processed/aperiodic_50supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10",
+        5_243_830_421,
     ),
-    # "periodic_supervised_n200000000_v26_a50_m64_z1p2_s5": (
-    #     "data/processed/periodic_supervised_n200000000_v26_a50_m64_z1p2_s5",
-    #     39_245_384_989,
+    # "aperiodic_100supervision_n200000000_v26_a50_m64_z1p2": (
+    #     "data/processed/aperiodic_100supervision_n200000000_v26_a50_m64_z1p2",
+    #     39_952_828_315,
     # ),
-    # "periodic_supervised_n200000000_v26_a50_m64_z1p2_s5_gte2048": (
-    #     "data/processed/periodic_supervised_n200000000_v26_a50_m64_z1p2_s5_gte2048",
-    #     8_994_499_443,
+    # "aperiodic_100supervision_n200000000_v26_a50_m64_z1p2_assignments_gte10": (
+    #     "data/processed/aperiodic_100supervision_n200000000_v26_a50_m64_z1p2_assignments_gte10",
+    #     33_789_706_236,
     # ),
-    "periodic_supervised_n200000000_v26_a50_m64_z1p2_s5_lt2048": (
-        "data/processed/periodic_supervised_n200000000_v26_a50_m64_z1p2_s5_lt2048",
-        30_250_885_546,
+    "aperiodic_100supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10": (
+        "data/processed/aperiodic_100supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10",
+        6_163_122_079,
     ),
-    # "periodic_unsupervised_n200000000_v26_a50_m64_z1p2_s4": (
-    #     "data/processed/periodic_unsupervised_n200000000_v26_a50_m64_z1p2_s4",
-    #     12_279_699_672,
+    # "periodic_0supervision_n200000000_v26_a50_m64_z1p2": (
+    #     "data/processed/periodic_0supervision_n200000000_v26_a50_m64_z1p2",
+    #     12_280_257_160,
     # ),
-    # "periodic_unsupervised_n200000000_v26_a50_m64_z1p2_s4_gte512": (
-    #     "data/processed/periodic_unsupervised_n200000000_v26_a50_m64_z1p2_s4_gte512",
-    #     582_433_300,
+    # "periodic_0supervision_n200000000_v26_a50_m64_z1p2_assignments_gte10": (
+    #     "data/processed/periodic_0supervision_n200000000_v26_a50_m64_z1p2_assignments_gte10",
+    #     8_495_963_227,
     # ),
-    "periodic_unsupervised_n200000000_v26_a50_m64_z1p2_s4_lt512": (
-        "data/processed/periodic_unsupervised_n200000000_v26_a50_m64_z1p2_s4_lt512",
-        11_697_266_372,
+    "periodic_0supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10": (
+        "data/processed/periodic_0supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10",
+        3_784_293_933,
     ),
-    # "r-trivial_supervised_n200000000_v26_a50_m64_z1p2_s1": (
-    #     "data/processed/r-trivial_supervised_n200000000_v26_a50_m64_z1p2_s1",
-    #     14_550_577_590,
+    # "periodic_50supervision_n200000000_v26_a50_m64_z1p2": (
+    #     "data/processed/periodic_50supervision_n200000000_v26_a50_m64_z1p2",
+    #     34_992_390_055,
     # ),
-    # "r-trivial_supervised_n200000000_v26_a50_m64_z1p2_s1_gte2048": (
-    #     "data/processed/r-trivial_supervised_n200000000_v26_a50_m64_z1p2_s1_gte2048",
-    #     7_063_790,
+    # "periodic_50supervision_n200000000_v26_a50_m64_z1p2_assignments_gte10": (
+    #     "data/processed/periodic_50supervision_n200000000_v26_a50_m64_z1p2_assignments_gte10",
+    #     29_871_525_899,
     # ),
-    "r-trivial_supervised_n200000000_v26_a50_m64_z1p2_s1_lt2048": (
-        "data/processed/r-trivial_supervised_n200000000_v26_a50_m64_z1p2_s1_lt2048",
-        14_543_513_800,
+    "periodic_50supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10": (
+        "data/processed/periodic_50supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10",
+        5_120_864_156,
     ),
-    # "r-trivial_unsupervised_n200000000_v26_a50_m64_z1p2_s0": (
-    #     "data/processed/r-trivial_unsupervised_n200000000_v26_a50_m64_z1p2_s0",
-    #     7_219_242_800,
+    # "periodic_100supervision_n200000000_v26_a50_m64_z1p2": (
+    #     "data/processed/periodic_100supervision_n200000000_v26_a50_m64_z1p2",
+    #     39_254_458_432,
     # ),
-    # "r-trivial_unsupervised_n200000000_v26_a50_m64_z1p2_s0_gte256": (
-    #     "data/processed/r-trivial_unsupervised_n200000000_v26_a50_m64_z1p2_s0_gte256",
-    #     969_644_472,
+    # "periodic_100supervision_n200000000_v26_a50_m64_z1p2_assignments_gte10": (
+    #     "data/processed/periodic_100supervision_n200000000_v26_a50_m64_z1p2_assignments_gte10",
+    #     33_214_964_138,
     # ),
-    "r-trivial_unsupervised_n200000000_v26_a50_m64_z1p2_s0_lt256": (
-        "data/processed/r-trivial_unsupervised_n200000000_v26_a50_m64_z1p2_s0_lt256",
-        6_249_598_328,
+    "periodic_100supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10": (
+        "data/processed/periodic_100supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10",
+        6_039_494_294,
     ),
+    # "r-trivial_0supervision_n200000000_v26_a50_m64_z1p2": (
+    #     "data/processed/r-trivial_0supervision_n200000000_v26_a50_m64_z1p2",
+    #     7_220_383_790,
+    # ),
+    # "r-trivial_0supervision_n200000000_v26_a50_m64_z1p2_assignments_gte5": (
+    #     "data/processed/r-trivial_0supervision_n200000000_v26_a50_m64_z1p2_assignments_gte5",
+    #     4_416_670_621,
+    # ),
+    "r-trivial_0supervision_n200000000_v26_a50_m64_z1p2_assignments_lt5": (
+        "data/processed/r-trivial_0supervision_n200000000_v26_a50_m64_z1p2_assignments_lt5",
+        2_803_713_169,
+    ),
+    # "r-trivial_0supervision_n200000000_v26_a50_m64_z1p2_s0": (
+    #     "data/processed/r-trivial_0supervision_n200000000_v26_a50_m64_z1p2_s0",
+    #     7_220_383_790,
+    # ),
+    # "r-trivial_0supervision_n200000000_v26_a50_m64_z1p2_s0_assignments_gte5": (
+    #     "data/processed/r-trivial_0supervision_n200000000_v26_a50_m64_z1p2_s0_assignments_gte5",
+    #     4_416_670_621,
+    # ),
+    # "r-trivial_0supervision_n200000000_v26_a50_m64_z1p2_s0_assignments_lt5": (
+    #     "data/processed/r-trivial_0supervision_n200000000_v26_a50_m64_z1p2_s0_assignments_lt5",
+    #     2_803_713_169,
+    # ),
+    # "r-trivial_50supervision_n200000000_v26_a50_m64_z1p2": (
+    #     "data/processed/r-trivial_50supervision_n200000000_v26_a50_m64_z1p2",
+    #     13_012_519_045,
+    # ),
+    # "r-trivial_50supervision_n200000000_v26_a50_m64_z1p2_assignments_gte5": (
+    #     "data/processed/r-trivial_50supervision_n200000000_v26_a50_m64_z1p2_assignments_gte5",
+    #     9_948_565_788,
+    # ),
+    "r-trivial_50supervision_n200000000_v26_a50_m64_z1p2_assignments_lt5": (
+        "data/processed/r-trivial_50supervision_n200000000_v26_a50_m64_z1p2_assignments_lt5",
+        3_063_953_257,
+    ),
+    # "r-trivial_50supervision_n200000000_v26_a50_m64_z1p2_s1": (
+    #     "data/processed/r-trivial_50supervision_n200000000_v26_a50_m64_z1p2_s1",
+    #     13_012_519_045,
+    # ),
+    # "r-trivial_50supervision_n200000000_v26_a50_m64_z1p2_s1_assignments_gte5": (
+    #     "data/processed/r-trivial_50supervision_n200000000_v26_a50_m64_z1p2_s1_assignments_gte5",
+    #     9_948_565_788,
+    # ),
+    # "r-trivial_50supervision_n200000000_v26_a50_m64_z1p2_s1_assignments_lt5": (
+    #     "data/processed/r-trivial_50supervision_n200000000_v26_a50_m64_z1p2_s1_assignments_lt5",
+    #     3_063_953_257,
+    # ),
+    # "r-trivial_100supervision_n200000000_v26_a50_m64_z1p2": (
+    #     "data/processed/r-trivial_100supervision_n200000000_v26_a50_m64_z1p2",
+    #     14_552_656_130,
+    # ),
+    # "r-trivial_100supervision_n200000000_v26_a50_m64_z1p2_assignments_gte5": (
+    #     "data/processed/r-trivial_100supervision_n200000000_v26_a50_m64_z1p2_assignments_gte5",
+    #     11_041_219_279,
+    # ),
+    "r-trivial_100supervision_n200000000_v26_a50_m64_z1p2_assignments_lt5": (
+        "data/processed/r-trivial_100supervision_n200000000_v26_a50_m64_z1p2_assignments_lt5",
+        3_511_436_851,
+    ),
+    # "r-trivial_100supervision_n200000000_v26_a50_m64_z1p2_s2": (
+    #     "data/processed/r-trivial_100supervision_n200000000_v26_a50_m64_z1p2_s2",
+    #     7_302_818_917,
+    # ),
+    # "r-trivial_100supervision_n200000000_v26_a50_m64_z1p2_s2_assignments_gte5": (
+    #     "data/processed/r-trivial_100supervision_n200000000_v26_a50_m64_z1p2_s2_assignments_gte5",
+    #     5_540_471_093,
+    # ),
+    # "r-trivial_100supervision_n200000000_v26_a50_m64_z1p2_s2_assignments_lt5": (
+    #     "data/processed/r-trivial_100supervision_n200000000_v26_a50_m64_z1p2_s2_assignments_lt5",
+    #     1_762_347_824,
+    # ),
+}
+
+SYNTHETIC_DATASET_ALIASES: dict[tuple[str, str, str], str] = {
+    ("aperiodic", "0sup", "lt10"): (
+        "aperiodic_0supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10"
+    ),
+    ("aperiodic", "50sup", "lt10"): (
+        "aperiodic_50supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10"
+    ),
+    ("aperiodic", "100sup", "lt10"): (
+        "aperiodic_100supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10"
+    ),
+    ("periodic", "0sup", "lt10"): (
+        "periodic_0supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10"
+    ),
+    ("periodic", "50sup", "lt10"): (
+        "periodic_50supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10"
+    ),
+    ("periodic", "100sup", "lt10"): (
+        "periodic_100supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10"
+    ),
+    ("r-trivial", "0sup", "lt5"): (
+        "r-trivial_0supervision_n200000000_v26_a50_m64_z1p2_assignments_lt5"
+    ),
+    ("r-trivial", "50sup", "lt5"): (
+        "r-trivial_50supervision_n200000000_v26_a50_m64_z1p2_assignments_lt5"
+    ),
+    ("r-trivial", "100sup", "lt5"): (
+        "r-trivial_100supervision_n200000000_v26_a50_m64_z1p2_assignments_lt5"
+    ),
+}
+
+SYNTHETIC_DATASET_CHINCHILLA_MULTIPLES: dict[str, float] = {
+    # Largest power-of-two multiple that fits within the dataset for both the transformer
+    # and hybrid 60M configs. The hybrid has the slightly larger 1xC budget, so it determines
+    # these conservative choices.
+    "aperiodic_0supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10": 2,
+    "aperiodic_50supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10": 4,
+    "aperiodic_100supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10": 4,
+    "periodic_0supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10": 2,
+    "periodic_50supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10": 4,
+    "periodic_100supervision_n200000000_v26_a50_m64_z1p2_assignments_lt10": 4,
+    "r-trivial_0supervision_n200000000_v26_a50_m64_z1p2_assignments_lt5": 2,
+    "r-trivial_50supervision_n200000000_v26_a50_m64_z1p2_assignments_lt5": 2,
+    "r-trivial_100supervision_n200000000_v26_a50_m64_z1p2_assignments_lt5": 2,
 }
 
 
 class SyntheticSize(StrEnum):
-    size_20M = "20M"
-    size_275M = "275M"
-    size_810M = "810M"
-    size_1_4B = "1.4B"
+    size_60M = "60M"
 
 
 def _source_label(dataset: str) -> str:
-    return dataset.replace("_n200000000_v26_a50_m64_z1p2_", "-")
+    return dataset.replace("_n200000000_v26_a50_m64_z1p2", "")
 
 
-class SyntheticModelConfigurator(HybridSmallSuiteModelConfigurator):
-    """Add a tiny model configuration to the hybrid-small-suite ladder models."""
+@dataclass(kw_only=True)
+class SyntheticModelConfigurator(Olmo3ModelConfigurator):
+    """Configure transformer or hybrid synthetic-ladder models from the OLMo3 60M preset."""
+
+    model_type: Literal["transformer", "hybrid"]
 
     def configure_rank_microbatch_size(
         self,
@@ -167,18 +278,11 @@ class SyntheticModelConfigurator(HybridSmallSuiteModelConfigurator):
         sequence_length: int,
         device_type: str,
     ) -> int:
-        if size_spec != SyntheticSize.size_20M:
-            return super().configure_rank_microbatch_size(
-                size_spec=size_spec,
-                sequence_length=sequence_length,
-                device_type=device_type,
-            )
-        del device_type
-        if self.rank_microbatch_size is not None:
-            assert self.rank_microbatch_size > 0
-            assert self.rank_microbatch_size % sequence_length == 0
-            return self.rank_microbatch_size
-        return 2 * sequence_length
+        return super().configure_rank_microbatch_size(
+            size_spec=size_spec,
+            sequence_length=sequence_length,
+            device_type=device_type,
+        )
 
     def configure_minimal_device_mesh_spec(
         self,
@@ -187,14 +291,11 @@ class SyntheticModelConfigurator(HybridSmallSuiteModelConfigurator):
         sequence_length: int,
         device_type: str,
     ) -> DeviceMeshSpec:
-        if size_spec != SyntheticSize.size_20M:
-            return super().configure_minimal_device_mesh_spec(
-                size_spec=size_spec,
-                sequence_length=sequence_length,
-                device_type=device_type,
-            )
-        del sequence_length, device_type
-        return DeviceMeshSpec(world_size=1, dp_world_size=None)
+        return super().configure_minimal_device_mesh_spec(
+            size_spec=size_spec,
+            sequence_length=sequence_length,
+            device_type=device_type,
+        )
 
     def configure_model(
         self,
@@ -204,98 +305,35 @@ class SyntheticModelConfigurator(HybridSmallSuiteModelConfigurator):
         tokenizer: TokenizerConfig,
         device_type: str,
     ) -> TransformerConfig:
-        if size_spec != SyntheticSize.size_20M:
-            return super().configure_model(
-                size_spec=size_spec,
-                sequence_length=sequence_length,
-                tokenizer=tokenizer,
-                device_type=device_type,
-            )
-        if sequence_length != 8192:
+        config = super().configure_model(
+            size_spec=size_spec,
+            sequence_length=sequence_length,
+            tokenizer=tokenizer,
+            device_type=device_type,
+        )
+        if self.model_type == SensitivityModelType.transformer:
+            return config
+
+        assert isinstance(config.block, TransformerBlockConfig)
+        assert isinstance(config.block.sequence_mixer, AttentionConfig)
+        if config.n_layers % 4 != 0:
             raise OLMoConfigurationError(
-                "The synthetic 20M model config currently assumes sequence length 8192."
+                f"Synthetic hybrid model requires n_layers to be divisible by 4; got "
+                f"{config.n_layers}."
             )
 
-        d_model = 128
-        hidden_size = 1024
-        n_layers = 14
-        n_heads = 2
-        head_dim = 64
-        layer_norm = LayerNormConfig(
-            name=LayerNormType.rms,
-            eps=1e-6,
-            bias=False,
-            dtype=DType.float32,
-        )
-        feed_forward = FeedForwardConfig(
-            hidden_size=hidden_size,
-            bias=False,
-            dtype=DType.float32,
-            activation=ActivationFunction.silu,
-        )
-        attention_block = TransformerBlockConfig(
-            name=TransformerBlockType.peri_norm,
-            sequence_mixer=AttentionConfig(
-                name=AttentionType.default,
-                n_heads=n_heads,
-                n_kv_heads=n_heads,
-                head_dim=head_dim,
-                bias=False,
-                rope=None,
-                gate=GateConfig(
-                    granularity=GateGranularity.elementwise,
-                    full_precision=True,
-                ),
-                qk_norm=layer_norm,
-                use_head_qk_norm=True,
-                backend=_attention_backend(device_type),
-                dtype=DType.float32,
+        attn_block = config.block
+        num_heads = attn_block.sequence_mixer.n_heads
+        gdn_block = attn_block.replace(
+            sequence_mixer=GatedDeltaNetConfig(
+                n_heads=num_heads,
+                head_dim=int(0.75 * config.d_model / num_heads),
+                allow_neg_eigval=True,
             ),
-            feed_forward=feed_forward,
-            layer_norm=layer_norm,
         )
-
-        block_overrides: dict[int, TransformerBlockConfig] | None = None
-        if self.model_type == SensitivityModelType.hybrid:
-            block = TransformerBlockConfig(
-                name=TransformerBlockType.peri_norm,
-                sequence_mixer=GatedDeltaNetConfig(
-                    n_heads=n_heads,
-                    n_v_heads=n_heads,
-                    head_dim=head_dim,
-                    expand_v=2.0,
-                    dtype=DType.float32,
-                ),
-                feed_forward=feed_forward,
-                layer_norm=layer_norm,
-            )
-            block_overrides = {
-                layer_idx: attention_block for layer_idx in range(n_layers) if layer_idx % 5 == 4
-            }
-        else:
-            block = attention_block
-
-        return TransformerConfig(
-            d_model=d_model,
-            vocab_size=tokenizer.padded_vocab_size(),
-            n_layers=n_layers,
-            block=block,
-            lm_head=LMHeadConfig(
-                loss_implementation=LMLossImplementation.default,
-                layer_norm=layer_norm,
-                bias=False,
-                dtype=DType.float32,
-            ),
-            dtype=DType.float32,
-            block_overrides=block_overrides,
-            embed_scale=math.sqrt(d_model),
-            embedding_norm=LayerNormConfig(
-                name=LayerNormType.rms,
-                eps=1e-6,
-                bias=False,
-            ),
-            tie_word_embeddings=True,
-        )
+        config.block = {"gdn": gdn_block, "attn": attn_block}
+        config.block_pattern = ["gdn", "gdn", "gdn", "attn"]
+        return config
 
 
 def _source_paths(args: argparse.Namespace) -> list[str]:
@@ -322,6 +360,108 @@ def _synthetic_source(
         sequence_length=args.sequence_length,
         label=label,
     )
+
+
+def _get_synthetic_tokens(args: argparse.Namespace) -> int:
+    if args.mixture_dataset_tokens is not None:
+        return args.mixture_dataset_tokens
+
+    _, configured_tokens = SYNTHETIC_DATASETS[args.mixture_dataset]
+    if configured_tokens > 0:
+        return configured_tokens
+
+    log.warning(
+        "No token count is configured for synthetic dataset '%s'. Recording 0 in run tags; "
+        "pass --mixture-dataset-tokens to override.",
+        args.mixture_dataset,
+    )
+    return 0
+
+
+def _normalize_dataset_family(family: str) -> str:
+    family = family.lower().replace("_", "-")
+    if family in {"rtrivial", "trivial"}:
+        family = "r-trivial"
+    return family
+
+
+def _normalize_supervision(supervision: str) -> str:
+    supervision = supervision.lower()
+    if supervision.endswith("supervision"):
+        supervision = supervision.removesuffix("supervision") + "sup"
+    elif supervision.isdigit():
+        supervision = f"{supervision}sup"
+    return supervision
+
+
+def _infer_split(family: str) -> str:
+    if family in {"aperiodic", "periodic"}:
+        return "lt10"
+    if family == "r-trivial":
+        return "lt5"
+    raise OLMoConfigurationError(
+        f"Unknown synthetic dataset family '{family}'. Expected one of: "
+        "aperiodic, periodic, r-trivial."
+    )
+
+
+def _normalize_dataset_spec(dataset_spec: list[str]) -> tuple[str, str, str] | None:
+    if not dataset_spec:
+        return None
+    if len(dataset_spec) not in {2, 3}:
+        raise OLMoConfigurationError(
+            "Synthetic dataset shorthand must have 2 parts, e.g. `aperiodic 0` or "
+            "`r-trivial 50`. The legacy 3-part form with an explicit split is also accepted."
+        )
+
+    family = _normalize_dataset_family(dataset_spec[0])
+    supervision = _normalize_supervision(dataset_spec[1])
+    split = _infer_split(family)
+    if len(dataset_spec) == 3:
+        explicit_split = dataset_spec[2].lower()
+        if explicit_split != split:
+            raise OLMoConfigurationError(
+                f"Split '{explicit_split}' does not match family '{family}'. Expected '{split}'."
+            )
+
+    return family, supervision, split
+
+
+def _resolve_mixture_dataset(args: argparse.Namespace) -> str:
+    shorthand = _normalize_dataset_spec(args.dataset_spec)
+    if shorthand is not None:
+        if args.mixture_dataset is not None:
+            raise OLMoConfigurationError(
+                "Specify either the shorthand dataset condition or --mixture-dataset, not both."
+            )
+        try:
+            return SYNTHETIC_DATASET_ALIASES[shorthand]
+        except KeyError as exc:
+            available = ", ".join(" ".join(alias) for alias in sorted(SYNTHETIC_DATASET_ALIASES))
+            raise OLMoConfigurationError(
+                f"Unknown synthetic dataset shorthand '{' '.join(shorthand)}'. "
+                f"Available conditions: {available}."
+            ) from exc
+
+    if args.mixture_dataset is not None:
+        return args.mixture_dataset
+
+    raise OLMoConfigurationError(
+        "Specify a synthetic dataset condition, e.g. `aperiodic 0`, or pass --mixture-dataset."
+    )
+
+
+def _resolve_chinchilla_multiple(args: argparse.Namespace) -> float:
+    if args.chinchilla_multiple is not None:
+        return args.chinchilla_multiple
+
+    try:
+        return SYNTHETIC_DATASET_CHINCHILLA_MULTIPLES[args.mixture_dataset]
+    except KeyError as exc:
+        raise OLMoConfigurationError(
+            f"No automatic Chinchilla multiple is configured for dataset "
+            f"'{args.mixture_dataset}'. Pass --chinchilla-multiple explicitly."
+        ) from exc
 
 
 def _model_configurator(args: argparse.Namespace) -> SyntheticModelConfigurator:
@@ -384,6 +524,7 @@ def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         workspace="ai2/linear-rnns",
         budget="ai2/oe-other",
         priority="urgent",
+        chinchilla_multiple=None,
     )
     if cmd == "launch-all":
         parser.set_defaults(_synthetic_launch_all=True)
@@ -394,10 +535,23 @@ def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         help="Model family for this condition.",
     )
     parser.add_argument(
+        "dataset_spec",
+        nargs="*",
+        metavar="DATASET",
+        help=(
+            "Optional shorthand dataset condition: FAMILY SUPERVISION, e.g. "
+            "`aperiodic 0`, `periodic 100`, or `r-trivial 50`. The split is inferred: "
+            "lt10 for aperiodic/periodic and lt5 for r-trivial."
+        ),
+    )
+    parser.add_argument(
         "--mixture-dataset",
         choices=sorted(SYNTHETIC_DATASETS),
-        required=cmd in {"dry-run", "benchmark", "launch-benchmark", "run", "launch", "metrics"},
-        help="Synthetic dataset to use for all pretraining tokens.",
+        default=None,
+        help=(
+            "Full synthetic dataset directory name to use for all pretraining tokens. "
+            "Usually the shorthand positional dataset condition is easier."
+        ),
     )
     parser.add_argument(
         "--mixture-dataset-root",
@@ -414,6 +568,16 @@ def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
             "relative dataset path is resolved under --mixture-dataset-root."
         ),
     )
+    parser.add_argument(
+        "--mixture-dataset-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Optional raw token count for the synthetic dataset, used only for run metadata. "
+            "The synthetic-only training duration is determined by the model size and "
+            "Chinchilla multiple."
+        ),
+    )
 
 
 def configure_ladder(args: argparse.Namespace) -> ModelLadder:
@@ -426,8 +590,8 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
     tokenizer = TokenizerConfig.dolma2()
     sizes = get_requested_sizes(args)
     size_for_duration = sizes[0]
-    if args.mixture_dataset is None:
-        args.mixture_dataset = next(iter(SYNTHETIC_DATASETS))
+    args.mixture_dataset = _resolve_mixture_dataset(args)
+    args.chinchilla_multiple = _resolve_chinchilla_multiple(args)
 
     run_configurator = WSDSChinchillaRunConfigurator(
         chinchilla_multiple=args.chinchilla_multiple,
@@ -466,7 +630,7 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
     ).value
 
     source_label = _source_label(args.mixture_dataset)
-    _, mixture_dataset_tokens = SYNTHETIC_DATASETS[args.mixture_dataset]
+    mixture_dataset_tokens = _get_synthetic_tokens(args)
     return SyntheticLadder(
         name=args.name,
         project=args.project,
