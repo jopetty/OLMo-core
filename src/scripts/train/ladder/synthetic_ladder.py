@@ -10,7 +10,8 @@ Typical usage:
     uv run src/scripts/train/ladder/synthetic_ladder.py launch \
       --size 60M \
       --model-type transformer \
-      aperiodic 100 \
+      --dataset-family aperiodic \
+      --supervision 100 \
       --max-gpus 8 \
       --cluster ai2/jupiter \
       --workspace ai2/linear-rnns \
@@ -428,11 +429,31 @@ def _normalize_dataset_spec(dataset_spec: list[str]) -> tuple[str, str, str] | N
 
 
 def _resolve_mixture_dataset(args: argparse.Namespace) -> str:
-    shorthand = _normalize_dataset_spec(args.dataset_spec)
+    named_spec = None
+    dataset_family = getattr(args, "dataset_family", None)
+    supervision = getattr(args, "supervision", None)
+    if dataset_family is not None or supervision is not None:
+        if dataset_family is None or supervision is None:
+            raise OLMoConfigurationError(
+                "Specify both --dataset-family and --supervision, or pass --mixture-dataset."
+            )
+        family = _normalize_dataset_family(dataset_family)
+        named_spec = (
+            family,
+            _normalize_supervision(supervision),
+            _infer_split(family),
+        )
+
+    positional_spec = _normalize_dataset_spec(getattr(args, "dataset_spec", []))
+    shorthand = named_spec or positional_spec
     if shorthand is not None:
         if args.mixture_dataset is not None:
             raise OLMoConfigurationError(
-                "Specify either the shorthand dataset condition or --mixture-dataset, not both."
+                "Specify either --dataset-family/--supervision or --mixture-dataset, not both."
+            )
+        if named_spec is not None and positional_spec is not None:
+            raise OLMoConfigurationError(
+                "Specify the synthetic dataset condition with named flags, not positional args."
             )
         try:
             return SYNTHETIC_DATASET_ALIASES[shorthand]
@@ -447,7 +468,8 @@ def _resolve_mixture_dataset(args: argparse.Namespace) -> str:
         return args.mixture_dataset
 
     raise OLMoConfigurationError(
-        "Specify a synthetic dataset condition, e.g. `aperiodic 0`, or pass --mixture-dataset."
+        "Specify a synthetic dataset condition, e.g. "
+        "`--dataset-family aperiodic --supervision 0`, or pass --mixture-dataset."
     )
 
 
@@ -535,14 +557,20 @@ def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         help="Model family for this condition.",
     )
     parser.add_argument(
-        "dataset_spec",
-        nargs="*",
-        metavar="DATASET",
+        "--dataset-family",
+        "--family",
+        choices=["aperiodic", "periodic", "r-trivial"],
+        default=None,
         help=(
-            "Optional shorthand dataset condition: FAMILY SUPERVISION, e.g. "
-            "`aperiodic 0`, `periodic 100`, or `r-trivial 50`. The split is inferred: "
-            "lt10 for aperiodic/periodic and lt5 for r-trivial."
+            "Synthetic dataset family. The split is inferred: lt10 for "
+            "aperiodic/periodic and lt5 for r-trivial."
         ),
+    )
+    parser.add_argument(
+        "--supervision",
+        choices=["0", "50", "100"],
+        default=None,
+        help="Synthetic dataset supervision level.",
     )
     parser.add_argument(
         "--mixture-dataset",
@@ -550,7 +578,7 @@ def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Full synthetic dataset directory name to use for all pretraining tokens. "
-            "Usually the shorthand positional dataset condition is easier."
+            "Usually --dataset-family and --supervision are easier."
         ),
     )
     parser.add_argument(
