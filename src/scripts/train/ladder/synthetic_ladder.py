@@ -42,7 +42,7 @@ from olmo_core.data.composable import (
     SamplingInstanceSourceConfig,
 )
 from olmo_core.exceptions import OLMoConfigurationError
-from olmo_core.internal.common import get_gpu_type, get_root_dir
+from olmo_core.internal.common import get_gpu_type
 from olmo_core.internal.ladder import get_requested_sizes, main
 from olmo_core.io import join_path
 from olmo_core.model_ladder import (
@@ -64,6 +64,7 @@ from sensitivity_ladder import (
 log = logging.getLogger(__name__)
 
 SYNTHETIC_DATA_ROOT = "/weka/oe-training-default/jacksonp/sensitivity-data"
+SYNTHETIC_LADDER_ROOT = "/weka/oe-training-default/ai2-llm"
 
 SYNTHETIC_DATASETS: dict[str, tuple[str, int]] = {
     # "aperiodic_0supervision_n200000000_v26_a50_m64_z1p2": (
@@ -264,6 +265,12 @@ class SyntheticSize(StrEnum):
 
 def _source_label(dataset: str) -> str:
     return dataset.replace("_n200000000_v26_a50_m64_z1p2", "")
+
+
+def _root_dir(cluster: str) -> str:
+    if cluster.startswith("ai2/"):
+        return SYNTHETIC_LADDER_ROOT
+    return "gs://ai2-llm"
 
 
 @dataclass(kw_only=True)
@@ -636,7 +643,7 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
     draft_ladder = ModelLadder(
         name=args.name,
         project=args.project,
-        dir=str(join_path(get_root_dir(args.cluster), "model-ladders", args.name)),
+        dir=str(join_path(_root_dir(args.cluster), "model-ladders", args.name)),
         sizes=sizes,
         max_devices=args.max_gpus,
         device_type=get_gpu_type(args.cluster),
@@ -662,7 +669,7 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
     return SyntheticLadder(
         name=args.name,
         project=args.project,
-        dir=str(join_path(get_root_dir(args.cluster), "model-ladders", args.name)),
+        dir=str(join_path(_root_dir(args.cluster), "model-ladders", args.name)),
         sizes=sizes,
         max_devices=args.max_gpus,
         device_type=get_gpu_type(args.cluster),
