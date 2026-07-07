@@ -551,7 +551,6 @@ def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(
         cluster="ai2/jupiter",
         workspace="ai2/beyond-state",
-        # workspace="ai2/linear-rnns",
         budget="ai2/oe-other",
         priority="urgent",
         chinchilla_multiple=None,
