@@ -12,6 +12,7 @@ Typical usage:
       --model-type transformer \
       --dataset-family aperiodic \
       --supervision 100 \
+      --init-seed 0 \
       --max-gpus 8 \
       --cluster ai2/jupiter \
       --workspace ai2/linear-rnns \
@@ -20,7 +21,7 @@ Typical usage:
 
 The default save layout is:
 
-    /weka/.../synthetic-ladder/{size}/{model_type}/{dataset}/Cx{chinchilla_multiple}
+    /weka/.../synthetic-ladder/{size}/{model_type}/{dataset}/Cx{chinchilla_multiple}/init_seed{init_seed}
 
 By default the synthetic datasets are loaded from:
 
@@ -278,6 +279,7 @@ class SyntheticModelConfigurator(Olmo3ModelConfigurator):
     """Configure transformer or hybrid synthetic-ladder models from the OLMo3 60M preset."""
 
     model_type: Literal["transformer", "hybrid"]
+    init_seed: int = 0
 
     def configure_rank_microbatch_size(
         self,
@@ -319,6 +321,7 @@ class SyntheticModelConfigurator(Olmo3ModelConfigurator):
             tokenizer=tokenizer,
             device_type=device_type,
         )
+        config.init_seed = self.init_seed
         if self.model_type == SensitivityModelType.transformer:
             return config
 
@@ -496,6 +499,7 @@ def _resolve_chinchilla_multiple(args: argparse.Namespace) -> float:
 def _model_configurator(args: argparse.Namespace) -> SyntheticModelConfigurator:
     return SyntheticModelConfigurator(
         model_type=str(args.model_type),
+        init_seed=args.init_seed,
         rank_microbatch_size=None
         if args.rank_mbz is None
         else args.rank_mbz * args.sequence_length,
@@ -511,6 +515,7 @@ class SyntheticLadder(ModelLadder):
     mixture_dataset_tokens: int
     training_tokens: int
     chinchilla_multiple: float
+    init_seed: int
 
     def get_save_folder(self, size_spec: str) -> str:
         return str(
@@ -520,6 +525,7 @@ class SyntheticLadder(ModelLadder):
                 self.model_type,
                 self.mixture_dataset,
                 f"Cx{_format_chinchilla_multiple(self.chinchilla_multiple)}",
+                f"init_seed{self.init_seed}",
             )
         )
 
@@ -527,7 +533,8 @@ class SyntheticLadder(ModelLadder):
         config = super()._configure_trainer(size_spec, for_benchmarking=for_benchmarking)
         run_name = (
             f"{size_spec}/{self.model_type}/{self.mixture_dataset}/"
-            f"Cx{_format_chinchilla_multiple(self.chinchilla_multiple)}"
+            f"Cx{_format_chinchilla_multiple(self.chinchilla_multiple)}/"
+            f"init_seed{self.init_seed}"
         )
         if "wandb" in config.callbacks:
             config.callbacks["wandb"].name = run_name  # type: ignore[attr-defined]
@@ -539,6 +546,7 @@ class SyntheticLadder(ModelLadder):
                 f"mixture_dataset:{_source_label(self.mixture_dataset)}",
                 "data:synth-only",
                 f"chinchilla_multiple:{_format_chinchilla_multiple(self.chinchilla_multiple)}",
+                f"init_seed:{self.init_seed}",
                 f"mixture_dataset_tokens:{self.mixture_dataset_tokens}",
                 f"training_tokens:{self.training_tokens}",
             )
@@ -554,6 +562,7 @@ def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         budget="ai2/oe-other",
         priority="urgent",
         chinchilla_multiple=None,
+        init_seed=0,
     )
     if cmd == "launch-all":
         parser.set_defaults(_synthetic_launch_all=True)
@@ -586,6 +595,15 @@ def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         help=(
             "Full synthetic dataset directory name to use for all pretraining tokens. "
             "Usually --dataset-family and --supervision are easier."
+        ),
+    )
+    parser.add_argument(
+        "--init-seed",
+        type=int,
+        default=0,
+        help=(
+            "Random seed used for model parameter initialization. This does not change the "
+            "ladder/data seed, so the synthetic data distribution stays fixed across init seeds."
         ),
     )
     parser.add_argument(
@@ -692,6 +710,7 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
         mixture_dataset_tokens=mixture_dataset_tokens,
         training_tokens=training_tokens,
         chinchilla_multiple=args.chinchilla_multiple,
+        init_seed=args.init_seed,
     )
 
 
