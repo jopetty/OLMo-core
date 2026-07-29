@@ -307,13 +307,19 @@ def launch_state_bench(args: argparse.Namespace) -> None:
                 launcher = configure_launcher(args, ladder, "run")
             finally:
                 sys.argv = original_argv
+            if suite_size > 1:
+                # The standard launcher enables a log-following soft timeout. A suite must
+                # submit every condition without following the first job, so disable that
+                # follow-only timeout for its individual submissions.
+                launcher.step_timeout = None
+                launcher.step_soft_timeout = None
 
             _launch_run(
                 ladder,
                 launcher,
                 args.size_enum(args.size),
                 # Following a multi-condition suite would block before later jobs launch.
-                follow=args.follow if suite_size == 1 or args.dry_run else False,
+                follow=args.follow if suite_size == 1 else False,
                 slack_notifications=args.slack_notifications,
                 dry_run=args.dry_run,
             )
