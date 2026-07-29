@@ -1,17 +1,18 @@
 """Launch synthetic-only ladder experiments on the StateBench training distribution.
 
 StateBench comprises the ``integer-code--r-trivial``, ``integer-code--aperiodic``,
-and ``integer-code--periodic`` training splits. The splits are sampled in
-proportion to their tokenized corpus sizes and repeated as necessary to fill the
-size-specific Chinchilla budget.
+and ``integer-code--periodic`` training splits. Each run selects exactly one split,
+which is repeated as necessary to fill the size-specific Chinchilla budget.
 
 Typical usage:
 
     uv run src/scripts/train/ladder/state_bench.py launch \\
-      --size 60M --model-type transformer --init-seed 0 --max-gpus 8
+      --size 60M --model-type transformer --distribution r-trivial \\
+      --init-seed 0 --max-gpus 8
 """
 
 import argparse
+import sys
 from dataclasses import dataclass
 
 from olmo_core.data import TokenizerConfig
@@ -24,7 +25,7 @@ from olmo_core.data.composable import (
 )
 from olmo_core.exceptions import OLMoConfigurationError
 from olmo_core.internal.common import get_gpu_type
-from olmo_core.internal.ladder import get_requested_sizes, main
+from olmo_core.internal.ladder import _launch_run, configure_launcher, get_requested_sizes, main
 from olmo_core.io import join_path
 from olmo_core.model_ladder import ModelLadder, WSDSChinchillaRunConfigurator
 
@@ -46,8 +47,11 @@ STATE_BENCH_DISTRIBUTION_TOKENS = {
     "integer-code--aperiodic": 3_003_000_000,
     "integer-code--periodic": 2_956_800_000,
 }
-STATE_BENCH_DISTRIBUTIONS = tuple(STATE_BENCH_DISTRIBUTION_TOKENS)
-STATE_BENCH_TOTAL_TOKENS = sum(STATE_BENCH_DISTRIBUTION_TOKENS.values())
+STATE_BENCH_DISTRIBUTION_ALIASES = {
+    "r-trivial": "integer-code--r-trivial",
+    "aperiodic": "integer-code--aperiodic",
+    "periodic": "integer-code--periodic",
+}
 
 
 def _root_dir(cluster: str) -> str:
@@ -95,6 +99,7 @@ class StateBenchLadder(ModelLadder):
     """Ladder recipe for synthetic-only StateBench pretraining experiments."""
 
     model_type: str
+    distribution: str
     state_bench_tokens: int
     training_tokens: int
     chinchilla_multiple: float
@@ -106,7 +111,7 @@ class StateBenchLadder(ModelLadder):
                 self.dir,
                 size_spec,
                 self.model_type,
-                "state-bench",
+                self.distribution,
                 f"Cx{_format_chinchilla_multiple(self.chinchilla_multiple)}",
                 f"init_seed{self.init_seed}",
             )
@@ -115,7 +120,7 @@ class StateBenchLadder(ModelLadder):
     def _configure_trainer(self, size_spec: str, for_benchmarking: bool = False):
         config = super()._configure_trainer(size_spec, for_benchmarking=for_benchmarking)
         run_name = (
-            f"{size_spec}/{self.model_type}/state-bench/"
+            f"{size_spec}/{self.model_type}/{self.distribution}/"
             f"Cx{_format_chinchilla_multiple(self.chinchilla_multiple)}/"
             f"init_seed{self.init_seed}"
         )
@@ -127,13 +132,8 @@ class StateBenchLadder(ModelLadder):
                 f"size:{size_spec}",
                 f"model_type:{self.model_type}",
                 "data:state-bench-only",
-                "state_bench_distribution:proportional",
-                *(f"state_bench_source:{source}" for source in STATE_BENCH_DISTRIBUTIONS),
-                *(
-                    f"state_bench_source_tokens:{source}:{tokens}"
-                    for source, tokens in STATE_BENCH_DISTRIBUTION_TOKENS.items()
-                ),
-                f"state_bench_total_tokens:{self.state_bench_tokens}",
+                f"state_bench_distribution:{self.distribution}",
+                f"state_bench_distribution_tokens:{self.state_bench_tokens}",
                 f"chinchilla_multiple:{_format_chinchilla_multiple(self.chinchilla_multiple)}",
                 f"init_seed:{self.init_seed}",
                 f"training_tokens:{self.training_tokens}",
@@ -152,19 +152,25 @@ def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         chinchilla_multiple=1.0,
         init_seed=0,
     )
-    if cmd == "launch-all":
-        parser.set_defaults(_state_bench_launch_all=True)
+    if cmd == "launch":
+        parser.set_defaults(func=launch_state_bench)
     parser.add_argument(
         "--model-type",
         choices=list(SensitivityModelType),
-        default=SensitivityModelType.transformer,
-        help="Model family for this condition.",
+        default=None,
+        help="Model family for this condition. Omit with `launch` to launch both families.",
     )
     parser.add_argument(
         "--init-seed",
         type=int,
         default=0,
         help="Random seed used for model parameter initialization.",
+    )
+    parser.add_argument(
+        "--distribution",
+        choices=sorted(STATE_BENCH_DISTRIBUTION_ALIASES),
+        default=None,
+        help="StateBench training distribution. Omit with `launch` to launch all distributions.",
     )
     parser.add_argument(
         "--state-bench-data-root",
@@ -175,13 +181,14 @@ def add_args(cmd: str, parser: argparse.ArgumentParser) -> None:
 
 
 def configure_ladder(args: argparse.Namespace) -> ModelLadder:
-    if getattr(args, "_state_bench_launch_all", False):
+    if args.model_type is None or args.distribution is None:
         raise OLMoConfigurationError(
-            "This ladder upsamples StateBench to a size-specific token budget. Use `launch` "
-            "with --size for each size instead of `launch-all`."
+            "Specify both --model-type and --distribution for a single ladder configuration. "
+            "The `launch` command expands omitted values into the corresponding suite."
         )
 
     tokenizer = TokenizerConfig.dolma2()
+    distribution = STATE_BENCH_DISTRIBUTION_ALIASES[args.distribution]
     sizes = get_requested_sizes(args)
     size_for_duration = sizes[0]
     run_configurator = WSDSChinchillaRunConfigurator(
@@ -207,10 +214,7 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
         run_configurator=run_configurator,
         sequence_length=args.sequence_length,
         tokenizer=tokenizer,
-        instance_sources=[
-            _state_bench_source(args, tokenizer, distribution)
-            for distribution in STATE_BENCH_DISTRIBUTIONS
-        ],
+        instance_sources=[_state_bench_source(args, tokenizer, distribution)],
         data_loader=ComposableDataLoaderConfig(
             num_workers=8, instance_filter_config=InstanceFilterConfig()
         ),
@@ -233,14 +237,10 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
         run_configurator=run_configurator,
         sequence_length=args.sequence_length,
         tokenizer=tokenizer,
-        # Sampling preserves the three source sizes' relative proportions, then repeats the
-        # distribution as needed to reach the Chinchilla training budget.
+        # Sampling repeats the selected distribution as needed to reach the Chinchilla budget.
         instance_sources=[
             SamplingInstanceSourceConfig(
-                sources=[
-                    _state_bench_source(args, tokenizer, distribution)
-                    for distribution in STATE_BENCH_DISTRIBUTIONS
-                ],
+                sources=[_state_bench_source(args, tokenizer, distribution)],
                 max_tokens=training_tokens,
                 label="state-bench",
             )
@@ -249,11 +249,74 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
             num_workers=8, instance_filter_config=InstanceFilterConfig()
         ),
         model_type=str(args.model_type),
-        state_bench_tokens=STATE_BENCH_TOTAL_TOKENS,
+        distribution=distribution,
+        state_bench_tokens=STATE_BENCH_DISTRIBUTION_TOKENS[distribution],
         training_tokens=training_tokens,
         chinchilla_multiple=args.chinchilla_multiple,
         init_seed=args.init_seed,
     )
+
+
+def _condition_argv(model_type: str, distribution: str) -> list[str]:
+    """Return the current command line with one concrete StateBench condition."""
+    condition_flags = {"--model-type", "--distribution"}
+    resolved_argv = [sys.argv[0]]
+    index = 1
+    while index < len(sys.argv):
+        argument = sys.argv[index]
+        if argument in condition_flags:
+            index += 2
+        elif any(argument.startswith(f"{flag}=") for flag in condition_flags):
+            index += 1
+        else:
+            resolved_argv.append(argument)
+            index += 1
+    return [
+        *resolved_argv,
+        "--model-type",
+        model_type,
+        "--distribution",
+        distribution,
+    ]
+
+
+def launch_state_bench(args: argparse.Namespace) -> None:
+    """Launch every StateBench condition selected by the optional suite filters."""
+    from olmo_core.utils import prepare_cli_environment
+
+    prepare_cli_environment()
+    model_types = [args.model_type] if args.model_type is not None else list(SensitivityModelType)
+    distributions = (
+        [args.distribution]
+        if args.distribution is not None
+        else list(STATE_BENCH_DISTRIBUTION_ALIASES)
+    )
+    suite_size = len(model_types) * len(distributions)
+
+    for model_type in model_types:
+        for distribution in distributions:
+            args.model_type = model_type
+            args.distribution = distribution
+            ladder = configure_ladder(args)
+
+            # ``configure_launcher`` builds the command from ``sys.argv``. Add the resolved
+            # suite condition so the Beaker job's ``run`` command is always concrete.
+            original_argv = sys.argv
+            sys.argv = _condition_argv(str(model_type), distribution)
+            try:
+                launcher = configure_launcher(args, ladder, "run")
+            finally:
+                sys.argv = original_argv
+
+            _launch_run(
+                ladder,
+                launcher,
+                args.size_enum(args.size),
+                # Following a multi-condition suite would block before later jobs launch.
+                follow=args.follow if suite_size == 1 or args.dry_run else False,
+                slack_notifications=args.slack_notifications,
+                dry_run=args.dry_run,
+            )
 
 
 if __name__ == "__main__":
