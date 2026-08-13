@@ -11,8 +11,8 @@
 #   scripts/launch_sb.sh [--n_seeds N] [extra args passed to state_bench.py launch]
 #
 # Examples:
-#   scripts/launch_sb.sh --max-gpus 8
-#   scripts/launch_sb.sh --n_seeds 3 --max-gpus 8
+#   scripts/launch_sb.sh
+#   scripts/launch_sb.sh --n_seeds 3
 
 set -euo pipefail
 
@@ -32,6 +32,14 @@ while [[ $# -gt 0 ]]; do
             n_seeds="${1#*=}"
             shift
             ;;
+        --max-gpus)
+            echo "error: --max-gpus is fixed at 8 and cannot be overridden" >&2
+            exit 1
+            ;;
+        --max-gpus=*)
+            echo "error: --max-gpus is fixed at 8 and cannot be overridden" >&2
+            exit 1
+            ;;
         *)
             extra_args+=("$1")
             shift
@@ -42,8 +50,8 @@ done
 for ((seed = 0; seed < n_seeds; seed++)); do
     if [[ "$n_seeds" -gt 1 ]]; then
         echo "=== Launching StateBench suite for init-seed $seed ==="
-        uv run "$STATE_BENCH_PY" launch --size 60M --init-seed "$seed" "${extra_args[@]+"${extra_args[@]}"}"
+        uv run "$STATE_BENCH_PY" launch --size 60M --max-gpus 8 --init-seed "$seed" "${extra_args[@]+"${extra_args[@]}"}"
     else
-        uv run "$STATE_BENCH_PY" launch --size 60M "${extra_args[@]+"${extra_args[@]}"}"
+        uv run "$STATE_BENCH_PY" launch --size 60M --max-gpus 8 "${extra_args[@]+"${extra_args[@]}"}"
     fi
 done
