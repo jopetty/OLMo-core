@@ -16,8 +16,13 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STATE_BENCH_PY="$SCRIPT_DIR/../src/scripts/train/ladder/state_bench.py"
+# `configure_launcher` (src/olmo_core/internal/ladder.py) builds the remote job's
+# command from `sys.argv[0]` verbatim, so we must invoke state_bench.py with a path
+# that's also valid inside the Beaker container's freshly cloned repo: a path
+# relative to the repo root, run from the repo root.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+STATE_BENCH_PY="src/scripts/train/ladder/state_bench.py"
 
 n_seeds=1
 extra_args=()
