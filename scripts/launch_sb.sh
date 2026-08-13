@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Launch the full StateBench suite: {hybrid,transformer} x {r-trivial,aperiodic,periodic}.
+# Launch the full StateBench suite: {hybrid,transformer} x {r-trivial,aperiodic,periodic}
+# at the 60M size.
 #
 # Each invocation of state_bench.py's `launch` command already expands over
 # model-type and distribution when both are omitted, so this script only needs
@@ -10,8 +11,8 @@
 #   scripts/launch_sb.sh [--n_seeds N] [extra args passed to state_bench.py launch]
 #
 # Examples:
-#   scripts/launch_sb.sh --size 60M --max-gpus 8
-#   scripts/launch_sb.sh --n_seeds 3 --size 60M --max-gpus 8
+#   scripts/launch_sb.sh --max-gpus 8
+#   scripts/launch_sb.sh --n_seeds 3 --max-gpus 8
 
 set -euo pipefail
 
@@ -41,8 +42,8 @@ done
 for ((seed = 0; seed < n_seeds; seed++)); do
     if [[ "$n_seeds" -gt 1 ]]; then
         echo "=== Launching StateBench suite for init-seed $seed ==="
-        uv run "$STATE_BENCH_PY" launch --init-seed "$seed" "${extra_args[@]+"${extra_args[@]}"}"
+        uv run "$STATE_BENCH_PY" launch --size 60M --init-seed "$seed" "${extra_args[@]+"${extra_args[@]}"}"
     else
-        uv run "$STATE_BENCH_PY" launch "${extra_args[@]+"${extra_args[@]}"}"
+        uv run "$STATE_BENCH_PY" launch --size 60M "${extra_args[@]+"${extra_args[@]}"}"
     fi
 done
