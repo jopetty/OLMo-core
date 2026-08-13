@@ -41,8 +41,8 @@ done
 for ((seed = 0; seed < n_seeds; seed++)); do
     if [[ "$n_seeds" -gt 1 ]]; then
         echo "=== Launching StateBench suite for init-seed $seed ==="
-        uv run "$STATE_BENCH_PY" launch --init-seed "$seed" "${extra_args[@]}"
+        uv run "$STATE_BENCH_PY" launch --init-seed "$seed" "${extra_args[@]+"${extra_args[@]}"}"
     else
-        uv run "$STATE_BENCH_PY" launch "${extra_args[@]}"
+        uv run "$STATE_BENCH_PY" launch "${extra_args[@]+"${extra_args[@]}"}"
     fi
 done
