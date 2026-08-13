@@ -43,9 +43,9 @@ STATE_BENCH_DATA_ROOT = (
     "state-tracking-long-context-v1/rendered-tokenized/tokens"
 )
 STATE_BENCH_DISTRIBUTION_TOKENS = {
-    "integer-code--r-trivial": 3_003_000_000,
-    "integer-code--aperiodic": 3_003_000_000,
-    "integer-code--periodic": 2_956_800_000,
+    "integer-code--r-trivial": 17_176_160_694,
+    "integer-code--aperiodic": 17_176_160_694,
+    "integer-code--periodic": 15_431_502_989,
 }
 STATE_BENCH_DISTRIBUTION_ALIASES = {
     "r-trivial": "integer-code--r-trivial",
